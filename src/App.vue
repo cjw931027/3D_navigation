@@ -1,85 +1,58 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
-import HelloWorld from './components/HelloWorld.vue'
+// 把 RouterLink (任意門) 也拿進來用
+import { RouterView, RouterLink } from 'vue-router'
 </script>
 
 <template>
-  <header>
-    <img alt="Vue logo" class="logo" src="@/assets/logo.svg" width="125" height="125" />
+  <div class="app-container">
+    <!-- 這是我們的全域導覽列，它永遠不會消失 -->
+    <nav class="navbar">
+      <!-- RouterLink 就是 Vue 版本的 <a> 標籤，但它不會重新整理網頁！ -->
+      <RouterLink to="/" class="nav-btn">回首頁</RouterLink>
+      <RouterLink to="/upload" class="nav-btn">去Upweload頁</RouterLink>
+    </nav>
 
-    <div class="wrapper">
-      <HelloWorld msg="You did it!" />
-
-      <nav>
-        <RouterLink to="/">Home</RouterLink>
-        <RouterLink to="/about">About</RouterLink>
-      </nav>
+    <!-- 下面這台電視機，會根據你點的連結，切換播 Home 或 Upload 的內容 -->
+    <div class="content">
+      <RouterView />
     </div>
-  </header>
-
-  <RouterView />
+  </div>
 </template>
 
-<style scoped>
-header {
-  line-height: 1.5;
-  max-height: 100vh;
+<style>
+/* 簡單的導覽列樣式 */
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background-color: #f0f2f5;
 }
 
-.logo {
-  display: block;
-  margin: 0 auto 2rem;
-}
-
-nav {
-  width: 100%;
-  font-size: 12px;
+.navbar {
+  background-color: #333;
+  padding: 15px;
   text-align: center;
-  margin-top: 2rem;
 }
 
-nav a.router-link-exact-active {
-  color: var(--color-text);
+.nav-btn {
+  color: white;
+  text-decoration: none;
+  margin: 0 10px;
+  padding: 8px 15px;
+  background-color: #555;
+  border-radius: 5px;
+  font-weight: bold;
 }
 
-nav a.router-link-exact-active:hover {
-  background-color: transparent;
+.nav-btn:hover {
+  background-color: #4CAF50;
 }
 
-nav a {
-  display: inline-block;
-  padding: 0 1rem;
-  border-left: 1px solid var(--color-border);
+/* 當前所在頁面的按鈕會變色 */
+.router-link-active {
+  background-color: #4CAF50;
 }
 
-nav a:first-of-type {
-  border: 0;
-}
-
-@media (min-width: 1024px) {
-  header {
-    display: flex;
-    place-items: center;
-    padding-right: calc(var(--section-gap) / 2);
-  }
-
-  .logo {
-    margin: 0 2rem 0 0;
-  }
-
-  header .wrapper {
-    display: flex;
-    place-items: flex-start;
-    flex-wrap: wrap;
-  }
-
-  nav {
-    text-align: left;
-    margin-left: -1rem;
-    font-size: 1rem;
-
-    padding: 1rem 0;
-    margin-top: 1rem;
-  }
+.content {
+  padding: 20px;
 }
 </style>
