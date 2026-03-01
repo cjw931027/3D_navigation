@@ -10,29 +10,25 @@ const mapCanvas = ref<HTMLCanvasElement | null>(null)
 
 // 3. 準備一個狀態來顯示訊息給使用者看
 const statusMessage = ref<string>('請選擇一張室內平面圖 (建議 PNG 或 JPG)')
+// 【新增】準備一個變數來顯示處理耗時
+const timeMessage = ref<string>('') 
 
 // 4. 當使用者選好檔案後，會觸發這個函數
 const handleFileUpload = (event: Event) => {
-  // 取得使用者上傳的檔案
   const target = event.target as HTMLInputElement
   if (!target.files || target.files.length === 0) return
   
   const file = target.files[0]
-  
-  // 【新增這行】明確告訴 TypeScript 如果沒有檔案就中斷，消除 undefined 的疑慮
   if (!file) return 
   
   statusMessage.value = '圖片讀取中...'
+  timeMessage.value = '' // 清空之前的時間
 
-  // 使用 FileReader 來讀取檔案內容
   const reader = new FileReader()
   
-  // 當檔案讀取完成後要做的事：
   reader.onload = (e) => {
-    // 建立一個隱形的圖片物件
     const img = new Image()
     
-    // 當隱形圖片載入完成後要做的事：
     img.onload = () => {
       const canvas = mapCanvas.value
       if (!canvas) return
@@ -40,27 +36,42 @@ const handleFileUpload = (event: Event) => {
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
-      // 將畫布的寬高設定成跟圖片一模一樣
-      canvas.width = img.width
-      canvas.height = img.height
+      const startTime = performance.now() // 開始計時
 
-      // 把圖片畫到 Canvas 上！(從座標 0,0 開始畫)
-      ctx.drawImage(img, 0, 0)
+      // 設定我們容許的「最大邊長」安全值
+      const MAX_SIZE = 1200
+      let targetWidth = img.width
+      let targetHeight = img.height
 
-      // 從 Canvas 擷取所有的像素資料 (Pixel Data)
+      // 如果圖片太大，計算縮放比例
+      if (targetWidth > MAX_SIZE || targetHeight > MAX_SIZE) {
+        const ratio = Math.min(MAX_SIZE / targetWidth, MAX_SIZE / targetHeight)
+        targetWidth = Math.round(targetWidth * ratio)
+        targetHeight = Math.round(targetHeight * ratio)
+        console.log(`[系統提示] 圖片過大 (${img.width}x${img.height})，已自動縮放為 ${targetWidth}x${targetHeight}`)
+      }
+
+      // 將畫布設定為「安全」的尺寸
+      canvas.width = targetWidth
+      canvas.height = targetHeight
+
+      // 把圖片畫到 Canvas 上 (傳入 targetWidth/Height 瀏覽器就會幫我們自動壓縮)
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-
-      // 把資料、寬度、高度存進 Pinia 冰箱裡！
       mapStore.setMapData(imageData.data, canvas.width, canvas.height)
 
-      statusMessage.value = `上傳成功！地圖尺寸：${canvas.width} x ${canvas.height}`
+      const endTime = performance.now() // 結束計時
+      const processTime = Math.round(endTime - startTime)
+
+      statusMessage.value = `上傳成功！最終地圖尺寸：${canvas.width} x ${canvas.height}`
+      timeMessage.value = `影像防護與處理耗時：${processTime} 毫秒`
+      // ==========================================
     }
     
-    // 把讀取到的檔案內容餵給隱形圖片
     img.src = e.target?.result as string
   }
   
-  // 指示 FileReader 以 Data URL (Base64字串) 的格式讀取檔案
   reader.readAsDataURL(file)
 }
 </script>
@@ -71,6 +82,8 @@ const handleFileUpload = (event: Event) => {
     
     <!-- 提示訊息 -->
     <p class="status">{{ statusMessage }}</p>
+    <!-- 【新增】顯示處理時間 -->
+    <p class="time-status" v-if="timeMessage">{{ timeMessage }}</p>
 
     <!-- 檔案上傳按鈕，限制只能選圖片 -->
     <div class="input-section">
@@ -99,6 +112,14 @@ const handleFileUpload = (event: Event) => {
 
 .status {
   color: #666;
+  margin-bottom: 10px;
+  font-weight: bold;
+}
+
+/* 【新增】時間訊息的樣式 */
+.time-status {
+  color: #e91e63;
+  font-size: 0.9em;
   margin-bottom: 20px;
   font-weight: bold;
 }
