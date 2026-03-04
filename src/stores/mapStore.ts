@@ -23,6 +23,7 @@ export const useMapStore = defineStore('map', () => {
   // 使用者點擊的起點與終點座標
   const startPoint = ref<Point | null>(null)
   const endPoint = ref<Point | null>(null)
+  const seedPoint = ref<Point | null>(null)
 
   // --- B. 修改資料的方法 (Actions) ---
 
@@ -31,6 +32,11 @@ export const useMapStore = defineStore('map', () => {
     imageRawData.value = data
     mapWidth.value = width
     mapHeight.value = height
+  }
+
+  // 存種子點
+  function setSeedPoint(seed:Point | null){
+    seedPoint.value = seed
   }
 
   // 當使用者在地圖上點擊起點或終點時，呼叫這個方法存座標
@@ -48,6 +54,8 @@ export const useMapStore = defineStore('map', () => {
     startPoint,
     endPoint,
     setMapData,
-    setPoints
+    setPoints,
+    seedPoint,
+    setSeedPoint
   }
 })
