@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// 🌟 1. 引入 toRaw
 import { ref, shallowRef, onMounted, toRaw } from 'vue'
 import { useMapStore } from '@/stores/mapStore'
 
@@ -16,7 +15,9 @@ const endPoint = ref<{x: number, y: number} | null>(null)
 
 const originalImageData = shallowRef<ImageData | null>(null)
 
+  // 自動還原
 onMounted(() => {
+  // 檢查Pinia內是否有資料
   if (mapStore.imageRawData && mapStore.mapWidth > 0 && mapStore.mapHeight > 0) {
     try {
       const canvas = mapCanvas.value
@@ -27,7 +28,6 @@ onMounted(() => {
       canvas.width = mapStore.mapWidth
       canvas.height = mapStore.mapHeight
 
-      // 🌟 2. 關鍵修復：用 toRaw() 把 Vue 的 Proxy 外套脫掉，還原成乾淨的陣列
       const rawPixelData = toRaw(mapStore.imageRawData)
       
       const restoredImageData = new ImageData(
@@ -63,7 +63,6 @@ onMounted(() => {
       statusMessage.value = `已從快取恢復地圖！尺寸：${canvas.width} x ${canvas.height}`
       
     } catch (error) {
-      // 🌟 3. 如果以後還有問題，我們就能從開發者工具(F12)看到真正的錯誤原因
       console.error("還原地圖時發生錯誤:", error)
       statusMessage.value = '地圖還原失敗，請重新上傳'
     }
@@ -114,7 +113,7 @@ const handleFileUpload = (event: Event) => {
 
       const endTime = performance.now()
       statusMessage.value = `上傳成功！最終地圖尺寸：${canvas.width} x ${canvas.height}`
-      timeMessage.value = `⏱️ 影像處理耗時：${Math.round(endTime - startTime)} 毫秒`
+      timeMessage.value = `影像處理耗時：${Math.round(endTime - startTime)} 毫秒`
     }
     img.src = e.target?.result as string
   }
@@ -218,7 +217,7 @@ const resetPoints = () => {
 
 <template>
   <main class="upload-container">
-    <h2>📁 上傳 2D 平面圖</h2>
+    <h2>上傳 2D 平面圖</h2>
     
     <p class="status">{{ statusMessage }}</p>
     <p class="time-status" v-if="timeMessage">{{ timeMessage }}</p>
