@@ -1,26 +1,22 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, toRaw } from 'vue'
 import { useMapStore } from '@/stores/mapStore'
 
-// 直接把wasm編譯出來的 JS 當成模組載入
 // @ts-ignore
 import loadWasm from '@/wasm/core.js'
 
 const mapStore = useMapStore()
-const calculationResult = ref<number | string>('尚未計算')
 const isEngineReady = ref(false)
+const processTime = ref<number | null>(null)
 
-// 讓使用者輸入的兩個數字變數
-const inputA = ref<number>(0)
-const inputB = ref<number>(0)
-
-// 準備一個變數來存放 C++ 引擎實體
 let wasmModule: any = null
 
-// 啟動 C++ 引擎的函數
+// 準備用來顯示 C++ 處理完圖片的 Canvas
+const previewCanvas = ref<HTMLCanvasElement | null>(null)
+
+// 1. 啟動 C++ 引擎
 const initEngine = async () => {
   try {
-    // 呼叫 loadWasm()，瀏覽器會在背景自動去抓 core.wasm 檔案
     wasmModule = await loadWasm()
     isEngineReady.value = true
     console.log('C++ WebAssembly 引擎啟動成功', wasmModule)
@@ -30,21 +26,62 @@ const initEngine = async () => {
   }
 }
 
-// 測試呼叫 C++ 的 add 函數
-const testCppAdd = () => {
+// 2. 將 Pinia 裡的圖片傳給 C++ 處理
+const testImageProcess = () => {
   if (!wasmModule) {
-    alert('請先啟動 C++ 引擎！')
-    return
+    return alert('請先啟動 C++ 引擎！')
   }
-  // 這裡直接呼叫我們在 C++ 用 Embind 綁定的 "add" 函數，並傳入使用者輸入的值
-  const result = wasmModule.add(inputA.value, inputB.value)
-  calculationResult.value = result
+  
+  // 使用 toRaw 脫掉 Vue 的 Proxy 外套，拿到乾淨的像素陣列
+  const rawData = toRaw(mapStore.imageRawData)
+  if (!rawData || mapStore.mapWidth === 0) {
+    return alert('請先到「上傳頁」上傳一張平面圖！')
+  }
+
+  const size = rawData.length // 陣列的長度 (像素數量)
+
+  // 開始計時
+  const startTime = performance.now()
+
+  // 步驟 A: 叫 C++ 準備一塊夠大的記憶體，並拿到「地址(Pointer)」
+  const pointer = wasmModule.allocateMemory(size)
+
+  // 步驟 B: 把 JS 的圖片陣列，瞬間倒進這塊 C++ 的記憶體裡！
+  wasmModule.HEAPU8.set(rawData, pointer)
+
+  // 步驟 C: 呼叫 C++ 進行極速運算 (反色濾鏡)
+  wasmModule.invertColors(size)
+
+  // 步驟 D: 算完之後，從 C++ 的記憶體把結果「抓」出來
+  // HEAPU8.buffer 就是 JS 與 C++ 共享的那個記憶體大池子
+  const resultData = new Uint8ClampedArray(
+    wasmModule.HEAPU8.buffer,
+    pointer,
+    size
+  )
+
+  const endTime = performance.now()
+  processTime.value = Math.round(endTime - startTime)
+
+  // 步驟 E: 釋放 C++ 記憶體 (好習慣，避免記憶體洩漏)
+  wasmModule.freeMemory()
+
+  // 步驟 F: 把結果畫到畫面上的 Canvas
+  const canvas = previewCanvas.value
+  if (!canvas) return
+  canvas.width = mapStore.mapWidth
+  canvas.height = mapStore.mapHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const newImageData = new ImageData(resultData, mapStore.mapWidth, mapStore.mapHeight)
+  ctx.putImageData(newImageData, 0, 0)
 }
 </script>
 
 <template>
   <main class="home-container">
-    <h1>首頁 / C++ 測試區</h1>
+    <h1>首頁 / C++ 演算法實驗室</h1>
     
     <div class="engine-panel">
       <p>引擎狀態：
@@ -57,22 +94,21 @@ const testCppAdd = () => {
         <button @click="initEngine" class="btn btn-blue" :disabled="isEngineReady">
           1. 啟動 C++ 引擎
         </button>
-        
-        <!-- 新增的數字輸入區塊 -->
-        <div class="input-area">
-          <input type="number" v-model="inputA" class="num-input" />
-          <span class="plus-sign">+</span>
-          <input type="number" v-model="inputB" class="num-input" />
-        </div>
 
-        <button @click="testCppAdd" class="btn btn-purple" :disabled="!isEngineReady">
-          2. 讓 C++ 計算
+        <button @click="testImageProcess" class="btn btn-purple" :disabled="!isEngineReady">
+          2. 執行 C++ 影像反色運算
         </button>
       </div>
 
-      <div class="result-box">
-        C++ 計算結果：<strong>{{ calculationResult }}</strong>
+      <div class="result-box" v-if="processTime !== null">
+        C++ 處理幾百萬個像素耗時：<strong>{{ processTime }} 毫秒</strong>
       </div>
+    </div>
+
+    <!-- 顯示 C++ 處理完的結果 -->
+    <div class="canvas-container">
+      <h3>C++ 運算結果預覽</h3>
+      <canvas ref="previewCanvas"></canvas>
     </div>
   </main>
 </template>
@@ -102,30 +138,6 @@ const testCppAdd = () => {
   margin: 20px 0; 
 }
 
-/* 輸入區塊的樣式 */
-.input-area {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 10px;
-  margin: 10px 0;
-}
-
-.num-input {
-  width: 80px;
-  padding: 8px;
-  font-size: 16px;
-  text-align: center;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-}
-
-.plus-sign {
-  font-size: 20px;
-  font-weight: bold;
-  color: #555;
-}
-
 .btn { 
   padding: 12px 20px; 
   font-size: 16px; 
@@ -153,7 +165,19 @@ const testCppAdd = () => {
   background-color: white;
   border: 2px dashed #9C27B0; 
   border-radius: 8px; 
-  font-size: 1.2em; 
+  font-size: 1.1em; 
   color: #333;
+}
+
+.canvas-container {
+  margin-top: 40px;
+}
+
+canvas {
+  max-width: 100%;
+  border: 2px solid #ccc;
+  border-radius: 8px;
+  background-color: white;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
 }
 </style>
