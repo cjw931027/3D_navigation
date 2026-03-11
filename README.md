@@ -51,6 +51,10 @@ pnpm build
 ```sh
 pnpm lint
 ```
+### 編譯 C++ 成WebAssembly
+```sh
+emcc src/wasm/core.cpp -o src/wasm/core.js -s MODULARIZE=1 -s EXPORT_ES6=1 -s ALLOW_MEMORY_GROWTH=1 -s EXPORTED_RUNTIME_METHODS="['HEAPU8']" --bind
+```
 
 ## 專案核心目錄結構
 - `src/views/` - 系統主要頁面 (如：Home 首頁、Upload 圖資處理、Nav 3D導航)

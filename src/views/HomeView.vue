@@ -43,17 +43,16 @@ const testImageProcess = () => {
   // 開始計時
   const startTime = performance.now()
 
-  // 步驟 A: 叫 C++ 準備一塊夠大的記憶體，並拿到「地址(Pointer)」
+  // 步驟 A: 叫 C++ 準備一塊夠大的記憶體，並拿到 Pointer
   const pointer = wasmModule.allocateMemory(size)
 
-  // 步驟 B: 把 JS 的圖片陣列，瞬間倒進這塊 C++ 的記憶體裡！
+  // 步驟 B: 把 JS 的圖片陣列，瞬間倒進這塊 C++ 的記憶體pointer裡
   wasmModule.HEAPU8.set(rawData, pointer)
 
   // 步驟 C: 呼叫 C++ 進行極速運算 (反色濾鏡)
   wasmModule.invertColors(size)
 
-  // 步驟 D: 算完之後，從 C++ 的記憶體把結果「抓」出來
-  // HEAPU8.buffer 就是 JS 與 C++ 共享的那個記憶體大池子
+  // 步驟 D: 算完之後，從 C++ 的記憶體把結果抓出來
   const resultData = new Uint8ClampedArray(
     wasmModule.HEAPU8.buffer,
     pointer,
@@ -63,7 +62,7 @@ const testImageProcess = () => {
   const endTime = performance.now()
   processTime.value = Math.round(endTime - startTime)
 
-  // 步驟 E: 釋放 C++ 記憶體 (好習慣，避免記憶體洩漏)
+  // 步驟 E: 釋放 C++ 記憶體 
   wasmModule.freeMemory()
 
   // 步驟 F: 把結果畫到畫面上的 Canvas
