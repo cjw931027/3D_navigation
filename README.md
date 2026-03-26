@@ -55,7 +55,20 @@ pnpm lint
 ```sh
 emcc src/wasm/core.cpp -o src/wasm/core.js -s MODULARIZE=1 -s EXPORT_ES6=1 -s ALLOW_MEMORY_GROWTH=1 -s EXPORTED_RUNTIME_METHODS="['HEAPU8']" --bind
 ```
+* **`-s MODULARIZE=1`**
+  將生成的 JavaScript 程式碼包裝成一個模組（Factory Function），而不是直接污染全域變數 (Global Scope)。這是現代前端開發的標準作法，確保模組可以被安全地 `await` 載入與初始化。
 
+* **`-s EXPORT_ES6=1`**
+  告訴編譯器輸出符合 ES6 標準的模組（亦即包含 `export default` 語法）。因為專案使用了 Vue 3 與 Vite 這種現代前端建置工具，必須開啟此選項才能在 Vue 元件中正常使用 `import loadWasm from '@/wasm/core.js'`。
+
+* **`-s ALLOW_MEMORY_GROWTH=1`**
+  允許 WebAssembly 的記憶體在執行期間動態增長。當 C++ 呼叫 `malloc` 需要分配的記憶體大於初始預設值（通常是 16MB）時，系統會自動擴充記憶體上限，避免處理超大解析度圖片時發生「Out of Memory (OOM)」崩潰錯誤。
+
+* **`-s EXPORTED_RUNTIME_METHODS="['HEAPU8']"`**
+  明確指示 Emscripten 暴露出底層的 `HEAPU8` 屬性。`HEAPU8` 是存取 WebAssembly 記憶體的「視窗」，開啟這個權限後，前端的 JavaScript 才能透過 `wasmModule.HEAPU8.set()` 直接將圖片的像素資料 (Uint8ClampedArray) 寫入 C++ 的記憶體空間中。
+
+* **`--bind`**
+  啟用 Embind 功能。這讓編譯器能夠讀懂 C++ 程式碼最下方的 `EMSCRIPTEN_BINDINGS` 區塊，自動將 C++ 的函數（如 `allocateMemory`、`floodFill`）綁定並轉換為 JavaScript 可以直接呼叫的 API。
 ## 專案核心目錄結構
 - `src/views/` - 系統主要頁面 (如：Home 首頁、Upload 圖資處理、Nav 3D導航)
 
