@@ -1,5 +1,13 @@
 <script setup lang="ts">
 import { RouterView, RouterLink } from 'vue-router'
+import { onMounted } from 'vue'                
+import { useMapStore } from '@/stores/mapStore'
+
+const mapStore = useMapStore()
+
+onMounted(() => {
+  mapStore.initEngine()
+})
 </script>
 
 <template>
