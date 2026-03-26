@@ -1,25 +1,20 @@
 #include <emscripten/bind.h>
-#include <iostream>
-#include <cstdlib> 
+#include <cstdlib>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <unordered_map>
 
 using namespace emscripten;
 
-// 全域指標，記錄我們跟系統借了哪一塊記憶體來放圖片
 uint8_t* mapBuffer = nullptr;
 
-// 開記憶體 (讓 JS 呼叫)
-// JS 告訴我們圖片有多大，我們就去借多大的空間，然後把「地址(指標)」還給 JS
 int allocateMemory(int size) {
-    if (mapBuffer != nullptr) {
-        free(mapBuffer);
-    }
-    // malloc: 向系統要求分配 size 大小的記憶體
+    if (mapBuffer != nullptr) free(mapBuffer);
     mapBuffer = (uint8_t*)malloc(size);
-    // 把記憶體地址轉成整數回傳給 JS
     return (int)mapBuffer;
 }
 
-// 釋放記憶體 
 void freeMemory() {
     if (mapBuffer != nullptr) {
         free(mapBuffer);
@@ -27,93 +22,357 @@ void freeMemory() {
     }
 }
 
-// 計算兩個顏色的差異 (使用歐幾里得距離的平方，避免開根號以追求極致效能)
-bool isColorSimilar(uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2, uint8_t g2, uint8_t b2, int tolerance) {
-    int dr = r1 - r2;
-    int dg = g1 - g2;
-    int db = b1 - b2;
-    // 兩點距離的平方 <= 容差的平方
-    return (dr * dr + dg * dg + db * db) <= (tolerance * tolerance);
+inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
+                        uint8_t r2, uint8_t g2, uint8_t b2) {
+    int dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
+    return dr*dr + dg*dg + db*db;
 }
 
-void floodFill(int width, int height, int startX, int startY, int tolerance) {
-    if (mapBuffer == nullptr) return;
-    
-    // 檢查起點是否超出邊界
-    if (startX < 0 || startX >= width || startY < 0 || startY >= height) return;
+struct RGB { uint8_t r, g, b; };
 
-    // 取得「種子點(起點)」的顏色，作為我們要尋找的目標顏色
-    int startIndex = (startY * width + startX) * 4;
-    uint8_t targetR = mapBuffer[startIndex];
-    uint8_t targetG = mapBuffer[startIndex + 1];
-    uint8_t targetB = mapBuffer[startIndex + 2];
+// ============================================================
+//  HSL 色彩空間
+// ============================================================
+struct HSL { float h, s, l; };  // h: 0~360, s: 0~1, l: 0~1
 
-    // 建立一個紀錄「走過沒有」的陣列 (大小 = 圖片像素總數)
+HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
+    float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
+    float mx = std::max({r, g, b}), mn = std::min({r, g, b});
+    float l = (mx + mn) * 0.5f;
+    float d = mx - mn;
+    float h = 0, s = 0;
+    if (d > 1e-6f) {
+        s = (l > 0.5f) ? d / (2.0f - mx - mn) : d / (mx + mn);
+        if (mx == r)      h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+        else if (mx == g) h = (b - r) / d + 2.0f;
+        else              h = (r - g) / d + 4.0f;
+        h *= 60.0f;
+    }
+    return { h, s, l };
+}
+
+// HSL 距離：低飽和度（灰色系）時忽略 H，只比 L
+float hslDist(HSL a, HSL b) {
+    float dL = a.l - b.l;
+    float dS = a.s - b.s;
+    // 飽和度都很低時 → 灰色系，H 不可靠
+    float satAvg = (a.s + b.s) * 0.5f;
+    if (satAvg < 0.12f) {
+        // 權重集中在亮度
+        return std::sqrt(dL * dL * 4.0f + dS * dS);
+    }
+    // 色相環距離
+    float dH = std::abs(a.h - b.h);
+    if (dH > 180.0f) dH = 360.0f - dH;
+    dH /= 360.0f;  // normalize to 0~0.5
+    return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
+}
+
+// ============================================================
+//  採色：取周圍 Top-K 眾數顏色
+// ============================================================
+// quantShift: 量化位移（3=32階, 2=64階）
+std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
+                                       int radius, int quantShift, int topK) {
+    std::unordered_map<uint32_t, int> freq;
+    int totalSamples = 0;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int i = (ny * width + nx) * 4;
+            uint8_t r = (mapBuffer[i]   >> quantShift) << quantShift;
+            uint8_t g = (mapBuffer[i+1] >> quantShift) << quantShift;
+            uint8_t b = (mapBuffer[i+2] >> quantShift) << quantShift;
+            uint32_t key = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            freq[key]++;
+            totalSamples++;
+        }
+    }
+
+    // 排序取 Top-K，門檻：至少佔 5% 的採樣量
+    int minCount = std::max(1, totalSamples / 20);
+    std::vector<std::pair<int, uint32_t>> sorted;
+    sorted.reserve(freq.size());
+    for (auto& kv : freq) {
+        if (kv.second >= minCount)
+            sorted.push_back({ kv.second, kv.first });
+    }
+    std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) {
+        return a.first > b.first;
+    });
+
+    std::vector<RGB> result;
+    int k = std::min(topK, (int)sorted.size());
+    for (int i = 0; i < k; i++) {
+        uint32_t c = sorted[i].second;
+        result.push_back({
+            (uint8_t)((c >> 16) & 0xFF),
+            (uint8_t)((c >>  8) & 0xFF),
+            (uint8_t)( c        & 0xFF)
+        });
+    }
+    // 至少回傳一個
+    if (result.empty()) {
+        uint32_t best = 0; int bestCount = 0;
+        for (auto& kv : freq)
+            if (kv.second > bestCount) { bestCount = kv.second; best = kv.first; }
+        result.push_back({
+            (uint8_t)((best >> 16) & 0xFF),
+            (uint8_t)((best >>  8) & 0xFF),
+            (uint8_t)( best        & 0xFF)
+        });
+    }
+    return result;
+}
+
+// 向下相容：取單一最大眾數
+RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
+    auto colors = sampleDominantColors(cx, cy, width, height, radius, 3, 1);
+    return colors[0];
+}
+
+void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++)
+        for (int x = half; x < width - half; x++)
+            if (mask[y*width + x] == 1)
+                for (int ky = -half; ky <= half; ky++)
+                    for (int kx = -half; kx <= half; kx++)
+                        result[(y+ky)*width + (x+kx)] = 1;
+    mask = result;
+}
+
+void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++) {
+        for (int x = half; x < width - half; x++) {
+            bool allOne = true;
+            for (int ky = -half; ky <= half && allOne; ky++)
+                for (int kx = -half; kx <= half && allOne; kx++)
+                    if (mask[(y+ky)*width + (x+kx)] == 0) allOne = false;
+            result[y*width + x] = allOne ? 1 : 0;
+        }
+    }
+    mask = result;
+}
+
+// BFS 擴散，回傳填到的像素數量（供外部判斷結果是否合理）
+int bfsFill(int width, int height, int seedX, int seedY,
+            const std::vector<uint8_t>& passableMask,
+            bool doColor) {
+    if (passableMask[seedY * width + seedX] == 0) return 0;
+
     std::vector<bool> visited(width * height, false);
-    
-    // 建立 Queue 來儲存準備要檢查的座標點 (為了效能，使用兩個一維陣列取代傳統 Queue)
-    std::vector<int> queueX;
-    std::vector<int> queueY;
-    // 預先分配記憶體，避免執行到一半卡頓
-    queueX.reserve(width * height / 4);
-    queueY.reserve(width * height / 4);
+    std::vector<int> qX, qY;
+    qX.reserve(width * height / 4);
+    qY.reserve(width * height / 4);
+    qX.push_back(seedX);
+    qY.push_back(seedY);
+    visited[seedY * width + seedX] = true;
 
-    // 把起點放入 Queue
-    queueX.push_back(startX);
-    queueY.push_back(startY);
-    visited[startY * width + startX] = true;
+    const int dx[] = {0, 0, -1, 1};
+    const int dy[] = {-1, 1, 0, 0};
+    int head = 0, count = 0;
 
-    int head = 0; // Queue 的讀取進度指標
-
-    // 定義往 上、下、左、右 四個方向走的座標偏移量
-    int dx[] = {0, 0, -1, 1};
-    int dy[] = {-1, 1, 0, 0};
-
-    // 開始擴散！直到 Queue 空了為止
-    while (head < queueX.size()) {
-        int cx = queueX[head];
-        int cy = queueY[head];
-        head++; // 讀取下一個
-
-        // 🎯 找到路了！把這個像素塗成「發光的青藍色」(代表可通行區域)
-        int pixelIndex = (cy * width + cx) * 4;
-        mapBuffer[pixelIndex] = 0;       // R (0)
-        mapBuffer[pixelIndex + 1] = 200; // G (200)
-        mapBuffer[pixelIndex + 2] = 255; // B (255)
-        // mapBuffer[pixelIndex + 3] 是透明度 A，保持原本的樣子
-
-        // 往四個方向探測
+    while (head < (int)qX.size()) {
+        int cx = qX[head], cy = qY[head++];
+        count++;
+        if (doColor) {
+            int pi = (cy * width + cx) * 4;
+            mapBuffer[pi]   = 0;
+            mapBuffer[pi+1] = 200;
+            mapBuffer[pi+2] = 255;
+        }
         for (int i = 0; i < 4; i++) {
-            int nx = cx + dx[i];
-            int ny = cy + dy[i];
+            int nx = cx + dx[i], ny = cy + dy[i];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int ni = ny * width + nx;
+            if (!visited[ni] && passableMask[ni] == 1) {
+                visited[ni] = true;
+                qX.push_back(nx);
+                qY.push_back(ny);
+            }
+        }
+    }
+    return count;
+}
 
-            // 確保沒有超出圖片範圍
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                int nIndex = ny * width + nx;
-                
-                // 如果還沒走過
-                if (!visited[nIndex]) {
-                    int nPixelIndex = nIndex * 4;
-                    uint8_t r = mapBuffer[nPixelIndex];
-                    uint8_t g = mapBuffer[nPixelIndex + 1];
-                    uint8_t b = mapBuffer[nPixelIndex + 2];
+bool findNearestPassable(int& sx, int& sy, int width, int height,
+                         const std::vector<uint8_t>& mask, int searchR = 12) {
+    if (mask[sy * width + sx] == 1) return true;
+    for (int r = 1; r <= searchR; r++)
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                int nx = sx + dx, ny = sy + dy;
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                    if (mask[ny * width + nx] == 1) { sx = nx; sy = ny; return true; }
+            }
+    return false;
+}
 
-                    // 如果顏色跟種子點夠像，就把它加入 Queue 繼續擴散
-                    if (isColorSimilar(r, g, b, targetR, targetG, targetB, tolerance)) {
-                        visited[nIndex] = true; // 標記為走過
-                        queueX.push_back(nx);
-                        queueY.push_back(ny);
-                    }
+// ============================================================
+//  建立路色遮罩 — RGB 版（室內用）
+// ============================================================
+std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
+                                           const std::vector<RGB>& pathColors,
+                                           int pathTolSq,
+                                           int closingKernelSize, int wallThicken) {
+    int total = width * height;
+    std::vector<uint8_t> mask(total, 0);
+
+    for (int i = 0; i < total; i++) {
+        uint8_t pr = mapBuffer[i*4], pg = mapBuffer[i*4+1], pb = mapBuffer[i*4+2];
+        for (auto& c : pathColors) {
+            if (colorDistSq(pr, pg, pb, c.r, c.g, c.b) <= pathTolSq) {
+                mask[i] = 1;
+                break;
+            }
+        }
+    }
+
+    if (closingKernelSize > 1) {
+        dilate(mask, width, height, closingKernelSize);
+        erode(mask, width, height, closingKernelSize);
+    }
+    if (wallThicken > 0) {
+        erode(mask, width, height, wallThicken * 2 + 1);
+    }
+    return mask;
+}
+
+// ============================================================
+//  建立路色遮罩 — HSL 版（室外用）
+// ============================================================
+std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
+                                           const std::vector<RGB>& pathColors,
+                                           float hslTolerance,
+                                           int closingKernelSize, int wallThicken) {
+    int total = width * height;
+    std::vector<uint8_t> mask(total, 0);
+
+    // 預轉原型色到 HSL
+    std::vector<HSL> protoHSL;
+    protoHSL.reserve(pathColors.size());
+    for (auto& c : pathColors) protoHSL.push_back(rgb2hsl(c.r, c.g, c.b));
+
+    for (int i = 0; i < total; i++) {
+        HSL px = rgb2hsl(mapBuffer[i*4], mapBuffer[i*4+1], mapBuffer[i*4+2]);
+        for (auto& ph : protoHSL) {
+            if (hslDist(px, ph) <= hslTolerance) {
+                mask[i] = 1;
+                break;
+            }
+        }
+    }
+
+    if (closingKernelSize > 1) {
+        dilate(mask, width, height, closingKernelSize);
+        erode(mask, width, height, closingKernelSize);
+    }
+    if (wallThicken > 0) {
+        erode(mask, width, height, wallThicken * 2 + 1);
+    }
+    return mask;
+}
+
+// ============================================================
+//  主函式：intelligentFloodFill
+//
+//  mode: 0 = indoor (RGB, single-color, quantShift=3)
+//        1 = outdoor (HSL, multi-color, quantShift=2)
+//
+//  pathColorTolerance:
+//    - indoor: RGB 歐式距離閾值 (建議 10~80)
+//    - outdoor: 會被內部映射為 HSL 距離閾值 (0~1 浮點)
+// ============================================================
+void intelligentFloodFill(int width, int height,
+                           int seedX, int seedY,
+                           int pathColorTolerance,
+                           int closingKernelSize,
+                           int wallThicken,
+                           int sampleRadius,
+                           int mode) {
+    if (mapBuffer == nullptr) return;
+    if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
+
+    std::vector<uint8_t> mask;
+
+    if (mode == 1) {
+        // === 室外模式 ===
+        int quantShift = 2;  // 64 色階
+        int topK = 4;
+        auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+                                                sampleRadius, quantShift, topK);
+
+        // pathColorTolerance (10~85) → HSL 距離 (0.03 ~ 0.28)
+        float hslTol = pathColorTolerance / 300.0f;
+        mask = buildPassableMaskHSL(width, height, pathColors, hslTol,
+                                     closingKernelSize, wallThicken);
+    } else {
+        // === 室內模式 ===
+        auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+                                                sampleRadius, 3, 1);
+        int tolSq = pathColorTolerance * pathColorTolerance;
+        mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
+                                     closingKernelSize, wallThicken);
+    }
+
+    int sx = seedX, sy = seedY;
+    if (!findNearestPassable(sx, sy, width, height, mask)) return;
+
+    bfsFill(width, height, sx, sy, mask, true);
+}
+
+// 舊介面保留（向下相容）
+void floodFill(int width, int height, int seedX, int seedY, int tolerance) {
+    if (mapBuffer == nullptr) return;
+    if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
+
+    int si = (seedY * width + seedX) * 4;
+    uint8_t tR = mapBuffer[si], tG = mapBuffer[si+1], tB = mapBuffer[si+2];
+    int tolSq = tolerance * tolerance;
+
+    std::vector<bool> visited(width * height, false);
+    std::vector<int> qX, qY;
+    qX.reserve(width * height / 4);
+    qY.reserve(width * height / 4);
+    qX.push_back(seedX); qY.push_back(seedY);
+    visited[seedY * width + seedX] = true;
+
+    const int dx[] = {0, 0, -1, 1};
+    const int dy[] = {-1, 1, 0, 0};
+    int head = 0;
+
+    while (head < (int)qX.size()) {
+        int cx = qX[head], cy = qY[head++];
+        int pi = (cy * width + cx) * 4;
+        mapBuffer[pi]   = 0;
+        mapBuffer[pi+1] = 200;
+        mapBuffer[pi+2] = 255;
+        for (int i = 0; i < 4; i++) {
+            int nx = cx + dx[i], ny = cy + dy[i];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int ni = ny * width + nx;
+            if (!visited[ni]) {
+                int npi = ni * 4;
+                if (colorDistSq(mapBuffer[npi], mapBuffer[npi+1], mapBuffer[npi+2],
+                                tR, tG, tB) <= tolSq) {
+                    visited[ni] = true;
+                    qX.push_back(nx); qY.push_back(ny);
                 }
             }
         }
     }
 }
 
-
-
 EMSCRIPTEN_BINDINGS(my_module) {
-    function("allocateMemory", &allocateMemory);
-    function("freeMemory", &freeMemory);
-    function("floodFill", &floodFill);
+    function("allocateMemory",       &allocateMemory);
+    function("freeMemory",           &freeMemory);
+    function("floodFill",            &floodFill);
+    function("intelligentFloodFill", &intelligentFloodFill);
 }
