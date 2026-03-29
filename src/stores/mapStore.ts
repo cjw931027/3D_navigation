@@ -28,15 +28,15 @@ const MODE_RANGE: Record<MapMode, ModeRange> = {
   indoor: {
     defaultSensitivity: 4,
     pathColorTolerance: [8,  60],
-    closingKernelSize:  [1,  7 ],  // 奇數：1,1,1,3,3,3,5,5,7,7
-    wallThicken:        [0,  2 ],  // 前 5 格固定 0，後 5 格 0→2
+    closingKernelSize:  [1,  7 ],  // 奇數插值；靈敏度 1~5 固定 1，6~10 升到 7
+    wallThicken:        [0,  2 ],  // 靈敏度 1~6 固定 0，7~10 線性升到 2
     sampleRadius:       [5,  12],
   },
   outdoor: {
     defaultSensitivity: 3,
     pathColorTolerance: [10, 70],
-    closingKernelSize:  [1,  5 ],  // 奇數：1~6 維持 1，7~10 升到 5
-    wallThicken:        [0,  3 ],  // 前 7 格固定 0，後 3 格 0→3
+    closingKernelSize:  [1,  5 ],  // 奇數插值；靈敏度 1~5 固定 1，6~10 升到 5
+    wallThicken:        [0,  3 ],  // 靈敏度 1~7 固定 0，8~10 線性升到 3
     sampleRadius:       [6,  16],
   },
 }
@@ -56,8 +56,17 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   const r = MODE_RANGE[mode]
   const t = (sensitivity - 1) / 9  // 1→0, 10→1
 
-  // ── closingKernelSize：奇數插值 ──
-  const closingKernelSize = lerpOdd(r.closingKernelSize[0], r.closingKernelSize[1], t)
+  // ── closingKernelSize：延遲啟動 + 奇數插值 ──
+  // [修改 2] 靈敏度 1~5 固定 kernel=1，避免低靈敏度就觸發大範圍填補。
+  //          室內與室外共用同一邏輯，6~10 才開始從 1 升到上限。
+  let closingKernelSize: number
+  if (sensitivity <= 5) {
+    closingKernelSize = 1
+  } else {
+    // 靈敏度 6→t2=0, 10→t2=1
+    const t2 = (sensitivity - 5) / 5
+    closingKernelSize = lerpOdd(r.closingKernelSize[0], r.closingKernelSize[1], t2)
+  }
 
   // ── wallThicken：延遲啟動，避免低靈敏度就截斷路徑 ──
   let wallThicken: number
@@ -167,10 +176,11 @@ export const useMapStore = defineStore('map', () => {
   }
 
   function sampleDominantColor(point: Point, radius: number): ColorRGB {
-    const data   = imageRawData.value!
-    const width  = mapWidth.value
-    const height = mapHeight.value
-    const freq   = new Map<number, number>()
+    const data      = imageRawData.value!
+    const width     = mapWidth.value
+    const height    = mapHeight.value
+    const freq      = new Map<number, number>()
+    const quantShift = mapMode.value === 'outdoor' ? 2 : 3
 
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
@@ -178,9 +188,9 @@ export const useMapStore = defineStore('map', () => {
         const ny = point.y + dy
         if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
         const i = (ny * width + nx) * 4
-        const r = (data[i]!   >> 3) << 3
-        const g = (data[i+1]! >> 3) << 3
-        const b = (data[i+2]! >> 3) << 3
+        const r = (data[i]!   >> quantShift) << quantShift
+        const g = (data[i+1]! >> quantShift) << quantShift
+        const b = (data[i+2]! >> quantShift) << quantShift
         const key = (r << 16) | (g << 8) | b
         freq.set(key, (freq.get(key) ?? 0) + 1)
       }
