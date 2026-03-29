@@ -72,6 +72,9 @@ float hslDist(HSL a, HSL b) {
 //  採色：取周圍 Top-K 眾數顏色
 // ============================================================
 // quantShift: 量化位移（3=32階, 2=64階）
+//
+// [修改 1] minCount 門檻從 5% 提高到 10%，過濾噪點／標記文字等
+//          次要顏色，避免它們進入 topK 造成遮罩誤納。
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -90,8 +93,8 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
         }
     }
 
-    // 排序取 Top-K，門檻：至少佔 5% 的採樣量
-    int minCount = std::max(1, totalSamples / 20);
+    // [修改 1] 門檻：至少佔 10% 的採樣量（原為 5%）
+    int minCount = std::max(1, totalSamples / 10);
     std::vector<std::pair<int, uint32_t>> sorted;
     sorted.reserve(freq.size());
     for (auto& kv : freq) {
@@ -202,6 +205,7 @@ int bfsFill(int width, int height, int seedX, int seedY,
     return count;
 }
 
+// [修改 3] searchR 改為外部傳入，讓呼叫端可根據 wallThicken 動態調整
 bool findNearestPassable(int& sx, int& sy, int width, int height,
                          const std::vector<uint8_t>& mask, int searchR = 12) {
     if (mask[sy * width + sx] == 1) return true;
@@ -288,7 +292,7 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
 //
 //  pathColorTolerance:
 //    - indoor: RGB 歐式距離閾值 (建議 10~80)
-//    - outdoor: 會被內部映射為 HSL 距離閾值 (0~1 浮點)
+//    - outdoor: 整數 10~70，內部映射為 HSL 距離閾值
 // ============================================================
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
@@ -305,12 +309,24 @@ void intelligentFloodFill(int width, int height,
     if (mode == 1) {
         // === 室外模式 ===
         int quantShift = 2;  // 64 色階
-        int topK = 4;
+
+        // [修改 2] topK 從 4 降為 2，只取最主要的兩個顏色，
+        //          避免噪點／標記文字被納入遮罩造成 BFS 漏出。
+        int topK = 2;
         auto pathColors = sampleDominantColors(seedX, seedY, width, height,
                                                 sampleRadius, quantShift, topK);
 
-        // pathColorTolerance (10~85) → HSL 距離 (0.03 ~ 0.28)
-        float hslTol = pathColorTolerance / 300.0f;
+        // [修改 4] HSL 容差映射改為根號曲線：
+        //   原本：hslTol = pathColorTolerance / 300.0f  （線性，低端太寬）
+        //   現在：hslTol = sqrt(t) * 0.22f，t = (tol-10)/(70-10)
+        //   效果：靈敏度 1（tol=10）→ 0.0，靈敏度 10（tol=70）→ 0.22
+        //         曲線在低靈敏度端較陡，高靈敏度端較平緩，
+        //         低飽和度地圖不會在低靈敏度就過度匹配。
+        float t = (float)(pathColorTolerance - 10) / 60.0f;  // 0~1
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        float hslTol = std::sqrt(t) * 0.22f;
+
         mask = buildPassableMaskHSL(width, height, pathColors, hslTol,
                                      closingKernelSize, wallThicken);
     } else {
@@ -322,8 +338,13 @@ void intelligentFloodFill(int width, int height,
                                      closingKernelSize, wallThicken);
     }
 
+    // [修改 3] searchR 動態計算：wallThicken 越大，erode 壓縮越多，
+    //          需要更大的搜尋半徑才能從種子點回到可通行區域。
+    //          base=12，每增加 1 的 wallThicken 額外加 3。
+    int searchR = 12 + wallThicken * 3;
+
     int sx = seedX, sy = seedY;
-    if (!findNearestPassable(sx, sy, width, height, mask)) return;
+    if (!findNearestPassable(sx, sy, width, height, mask, searchR)) return;
 
     bfsFill(width, height, sx, sy, mask, true);
 }
