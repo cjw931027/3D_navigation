@@ -4,10 +4,26 @@
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
+#include <queue>
+#include <functional>
 
 using namespace emscripten;
 
 uint8_t* mapBuffer = nullptr;
+
+// ============================================================
+//  A* 用：可通行遮罩全域快取
+//
+//  intelligentFloodFill 執行後，會將遮罩存入此緩衝區，
+//  供後續 runAStar 直接使用，不需重新建立遮罩。
+// ============================================================
+static std::vector<uint8_t>  g_passableMask;
+static int                   g_maskWidth  = 0;
+static int                   g_maskHeight = 0;
+
+// A* 路徑結果緩衝區（交替存 x,y：x0,y0,x1,y1,...）
+// JS 透過 getPathBuffer() 取得指標後用 Int32Array 直接讀取。
+static std::vector<int32_t>  g_pathBuffer;
 
 int allocateMemory(int size) {
     if (mapBuffer != nullptr) free(mapBuffer);
@@ -33,7 +49,7 @@ struct RGB { uint8_t r, g, b; };
 // ============================================================
 //  HSL 色彩空間
 // ============================================================
-struct HSL { float h, s, l; };  // h: 0~360, s: 0~1, l: 0~1
+struct HSL { float h, s, l; };
 
 HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
@@ -51,30 +67,22 @@ HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     return { h, s, l };
 }
 
-// HSL 距離：低飽和度（灰色系）時忽略 H，只比 L
 float hslDist(HSL a, HSL b) {
     float dL = a.l - b.l;
     float dS = a.s - b.s;
-    // 飽和度都很低時 → 灰色系，H 不可靠
     float satAvg = (a.s + b.s) * 0.5f;
     if (satAvg < 0.12f) {
-        // 權重集中在亮度
         return std::sqrt(dL * dL * 4.0f + dS * dS);
     }
-    // 色相環距離
     float dH = std::abs(a.h - b.h);
     if (dH > 180.0f) dH = 360.0f - dH;
-    dH /= 360.0f;  // normalize to 0~0.5
+    dH /= 360.0f;
     return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
 }
 
 // ============================================================
 //  採色：取周圍 Top-K 眾數顏色
 // ============================================================
-// quantShift: 量化位移（3=32階, 2=64階）
-//
-// [修改 1] minCount 門檻從 5% 提高到 10%，過濾噪點／標記文字等
-//          次要顏色，避免它們進入 topK 造成遮罩誤納。
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -93,7 +101,6 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
         }
     }
 
-    // [修改 1] 門檻：至少佔 10% 的採樣量（原為 5%）
     int minCount = std::max(1, totalSamples / 10);
     std::vector<std::pair<int, uint32_t>> sorted;
     sorted.reserve(freq.size());
@@ -115,7 +122,6 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
             (uint8_t)( c        & 0xFF)
         });
     }
-    // 至少回傳一個
     if (result.empty()) {
         uint32_t best = 0; int bestCount = 0;
         for (auto& kv : freq)
@@ -129,7 +135,6 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
     return result;
 }
 
-// 向下相容：取單一最大眾數
 RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
     auto colors = sampleDominantColors(cx, cy, width, height, radius, 3, 1);
     return colors[0];
@@ -164,7 +169,6 @@ void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     mask = result;
 }
 
-// BFS 擴散，回傳填到的像素數量（供外部判斷結果是否合理）
 int bfsFill(int width, int height, int seedX, int seedY,
             const std::vector<uint8_t>& passableMask,
             bool doColor) {
@@ -205,7 +209,6 @@ int bfsFill(int width, int height, int seedX, int seedY,
     return count;
 }
 
-// [修改 3] searchR 改為外部傳入，讓呼叫端可根據 wallThicken 動態調整
 bool findNearestPassable(int& sx, int& sy, int width, int height,
                          const std::vector<uint8_t>& mask, int searchR = 12) {
     if (mask[sy * width + sx] == 1) return true;
@@ -219,9 +222,6 @@ bool findNearestPassable(int& sx, int& sy, int width, int height,
     return false;
 }
 
-// ============================================================
-//  建立路色遮罩 — RGB 版（室內用）
-// ============================================================
 std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
                                            const std::vector<RGB>& pathColors,
                                            int pathTolSq,
@@ -249,9 +249,6 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     return mask;
 }
 
-// ============================================================
-//  建立路色遮罩 — HSL 版（室外用）
-// ============================================================
 std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
                                            const std::vector<RGB>& pathColors,
                                            float hslTolerance,
@@ -259,7 +256,6 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
     int total = width * height;
     std::vector<uint8_t> mask(total, 0);
 
-    // 預轉原型色到 HSL
     std::vector<HSL> protoHSL;
     protoHSL.reserve(pathColors.size());
     for (auto& c : pathColors) protoHSL.push_back(rgb2hsl(c.r, c.g, c.b));
@@ -284,16 +280,8 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
     return mask;
 }
 
-// ============================================================
-//  主函式：intelligentFloodFill
-//
-//  mode: 0 = indoor (RGB, single-color, quantShift=3)
-//        1 = outdoor (HSL, multi-color, quantShift=2)
-//
-//  pathColorTolerance:
-//    - indoor: RGB 歐式距離閾值 (建議 10~80)
-//    - outdoor: 整數 10~70，內部映射為 HSL 距離閾值
-// ============================================================
+//  intelligentFloodFill
+//  （與之前相同，新增：執行後將 mask 存入 g_passableMask）
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
                            int pathColorTolerance,
@@ -307,30 +295,25 @@ void intelligentFloodFill(int width, int height,
     std::vector<uint8_t> mask;
 
     if (mode == 1) {
-        // === 室外模式 ===
-        int quantShift = 2;  // 64 色階
-
-        // [修改 2] topK 從 4 降為 2，只取最主要的兩個顏色，
-        //          避免噪點／標記文字被納入遮罩造成 BFS 漏出。
+        int quantShift = 2;
         int topK = 2;
         auto pathColors = sampleDominantColors(seedX, seedY, width, height,
                                                 sampleRadius, quantShift, topK);
-
-        // [修改 4] HSL 容差映射改為根號曲線：
-        //   原本：hslTol = pathColorTolerance / 300.0f  （線性，低端太寬）
-        //   現在：hslTol = sqrt(t) * 0.22f，t = (tol-10)/(70-10)
-        //   效果：靈敏度 1（tol=10）→ 0.0，靈敏度 10（tol=70）→ 0.22
-        //         曲線在低靈敏度端較陡，高靈敏度端較平緩，
-        //         低飽和度地圖不會在低靈敏度就過度匹配。
-        float t = (float)(pathColorTolerance - 10) / 60.0f;  // 0~1
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-        float hslTol = std::sqrt(t) * 0.22f;
-
+        float hslTol;
+        if (pathColorTolerance <= 40) {
+            float t = (float)(pathColorTolerance - 10) / 30.0f;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            hslTol = 0.04f + t * 0.06f;
+        } else {
+            float t = (float)(pathColorTolerance - 40) / 30.0f;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            hslTol = 0.10f + t * 0.10f;
+        }
         mask = buildPassableMaskHSL(width, height, pathColors, hslTol,
                                      closingKernelSize, wallThicken);
     } else {
-        // === 室內模式 ===
         auto pathColors = sampleDominantColors(seedX, seedY, width, height,
                                                 sampleRadius, 3, 1);
         int tolSq = pathColorTolerance * pathColorTolerance;
@@ -338,18 +321,126 @@ void intelligentFloodFill(int width, int height,
                                      closingKernelSize, wallThicken);
     }
 
-    // [修改 3] searchR 動態計算：wallThicken 越大，erode 壓縮越多，
-    //          需要更大的搜尋半徑才能從種子點回到可通行區域。
-    //          base=12，每增加 1 的 wallThicken 額外加 3。
     int searchR = 12 + wallThicken * 3;
-
     int sx = seedX, sy = seedY;
     if (!findNearestPassable(sx, sy, width, height, mask, searchR)) return;
 
     bfsFill(width, height, sx, sy, mask, true);
+
+
+    g_passableMask = mask;
+    g_maskWidth    = width;
+    g_maskHeight   = height;
 }
 
-// 舊介面保留（向下相容）
+int runAStar(int startX, int startY, int endX, int endY) {
+    g_pathBuffer.clear();
+
+    if (g_passableMask.empty() || g_maskWidth <= 0 || g_maskHeight <= 0) return 0;
+
+    int W = g_maskWidth, H = g_maskHeight;
+
+    int sx = startX, sy = startY;
+    int ex = endX,   ey = endY;
+    if (!findNearestPassable(sx, sy, W, H, g_passableMask, 20)) return 0;
+    if (!findNearestPassable(ex, ey, W, H, g_passableMask, 20)) return 0;
+
+    if (sx == ex && sy == ey) {
+        g_pathBuffer = { sx, sy };
+        return 1;
+    }
+
+    // 資料結構 
+    struct Node {
+        float f, g;
+        int   idx;
+        bool operator>(const Node& o) const { return f > o.f; }
+    };
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> openSet;
+
+    std::vector<float> gCost(W * H, 1e30f);
+    std::vector<int>   parent(W * H, -1);
+    std::vector<bool>  closed(W * H, false);
+
+    // 8 方向定義
+    const int   DDX[8]  = {  0,  0, -1,  1, -1, -1,  1,  1 };
+    const int   DDY[8]  = { -1,  1,  0,  0, -1,  1, -1,  1 };
+    const float COST[8] = { 1.f, 1.f, 1.f, 1.f,
+                             1.41421356f, 1.41421356f, 1.41421356f, 1.41421356f };
+
+    auto heuristic = [&](int x, int y) -> float {
+        float dx = (float)std::abs(x - ex);
+        float dy = (float)std::abs(y - ey);
+        return std::max(dx, dy) + (1.41421356f - 1.0f) * std::min(dx, dy);
+    };
+
+    int startIdx = sy * W + sx;
+    int endIdx   = ey * W + ex;
+    gCost[startIdx] = 0.0f;
+    openSet.push({ heuristic(sx, sy), 0.0f, startIdx });
+
+    bool found = false;
+
+    while (!openSet.empty()) {
+        Node cur = openSet.top(); openSet.pop();
+        int ci = cur.idx;
+        if (closed[ci]) continue;
+        closed[ci] = true;
+        if (ci == endIdx) { found = true; break; }
+
+        int cx = ci % W, cy = ci / W;
+
+        for (int d = 0; d < 8; d++) {
+            int nx = cx + DDX[d], ny = cy + DDY[d];
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+            int ni = ny * W + nx;
+            if (closed[ni] || g_passableMask[ni] == 0) continue;
+
+            // 斜角防穿牆角：確認兩側直線鄰格都可通行
+            if (d >= 4) {
+                int sideAx = cx + DDX[d], sideAy = cy;
+                int sideBx = cx,          sideBy = cy + DDY[d];
+                if (g_passableMask[sideAy * W + sideAx] == 0 ||
+                    g_passableMask[sideBy * W + sideBx] == 0) continue;
+            }
+
+            float ng = cur.g + COST[d];
+            if (ng < gCost[ni]) {
+                gCost[ni]  = ng;
+                parent[ni] = ci;
+                openSet.push({ ng + heuristic(nx, ny), ng, ni });
+            }
+        }
+    }
+
+    if (!found) return 0;
+
+    // 回溯並輸出路徑（起點 → 終點順序） 
+    std::vector<int32_t> reversed;
+    for (int i = endIdx; i != -1; i = parent[i]) {
+        reversed.push_back(i % W);  // x
+        reversed.push_back(i / W);  // y
+    }
+
+    int pairCount = (int)(reversed.size() / 2);
+    g_pathBuffer.resize(reversed.size());
+    for (int i = 0; i < pairCount; i++) {
+        g_pathBuffer[i * 2]     = reversed[(pairCount - 1 - i) * 2];      // x
+        g_pathBuffer[i * 2 + 1] = reversed[(pairCount - 1 - i) * 2 + 1];  // y
+    }
+
+    return pairCount;
+}
+
+// JS 存取路徑結果
+int getPathBuffer() {
+    return (int)(intptr_t)(g_pathBuffer.data());
+}
+
+int getPathLength() {
+    return (int)(g_pathBuffer.size() / 2);
+}
+
 void floodFill(int width, int height, int seedX, int seedY, int tolerance) {
     if (mapBuffer == nullptr) return;
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
@@ -396,4 +487,7 @@ EMSCRIPTEN_BINDINGS(my_module) {
     function("freeMemory",           &freeMemory);
     function("floodFill",            &floodFill);
     function("intelligentFloodFill", &intelligentFloodFill);
+    function("runAStar",             &runAStar);
+    function("getPathBuffer",        &getPathBuffer);
+    function("getPathLength",        &getPathLength);
 }
