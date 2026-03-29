@@ -28,16 +28,16 @@ const MODE_RANGE: Record<MapMode, ModeRange> = {
   indoor: {
     defaultSensitivity: 4,
     pathColorTolerance: [8,  60],
-    closingKernelSize:  [1,  7 ],  // 奇數插值；靈敏度 1~5 固定 1，6~10 升到 7
-    wallThicken:        [0,  2 ],  // 靈敏度 1~6 固定 0，7~10 線性升到 2
+    closingKernelSize:  [1,  7 ],
+    wallThicken:        [0,  2 ],
     sampleRadius:       [5,  12],
   },
   outdoor: {
-    defaultSensitivity: 3,
+    defaultSensitivity: 4,
     pathColorTolerance: [10, 70],
-    closingKernelSize:  [1,  5 ],  // 奇數插值；靈敏度 1~5 固定 1，6~10 升到 5
-    wallThicken:        [0,  3 ],  // 靈敏度 1~7 固定 0，8~10 線性升到 3
-    sampleRadius:       [6,  16],
+    closingKernelSize:  [1,  5 ],
+    wallThicken:        [0,  2 ],
+    sampleRadius:       [4,  12],
   },
 }
 
@@ -45,7 +45,6 @@ function lerp(a: number, b: number, t: number): number {
   return Math.round(a + (b - a) * t)
 }
 
-// 插值後對齊奇數（closing kernel 必須為奇數）
 function lerpOdd(a: number, b: number, t: number): number {
   const v = a + (b - a) * t
   const rounded = Math.round(v)
@@ -54,37 +53,30 @@ function lerpOdd(a: number, b: number, t: number): number {
 
 function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   const r = MODE_RANGE[mode]
-  const t = (sensitivity - 1) / 9  // 1→0, 10→1
+  const t = (sensitivity - 1) / 9
 
-  // ── closingKernelSize：延遲啟動 + 奇數插值 ──
-  // [修改 2] 靈敏度 1~5 固定 kernel=1，避免低靈敏度就觸發大範圍填補。
-  //          室內與室外共用同一邏輯，6~10 才開始從 1 升到上限。
   let closingKernelSize: number
   if (sensitivity <= 5) {
     closingKernelSize = 1
   } else {
-    // 靈敏度 6→t2=0, 10→t2=1
     const t2 = (sensitivity - 5) / 5
     closingKernelSize = lerpOdd(r.closingKernelSize[0], r.closingKernelSize[1], t2)
   }
 
-  // ── wallThicken：延遲啟動，避免低靈敏度就截斷路徑 ──
   let wallThicken: number
   if (mode === 'indoor') {
-    // 靈敏度 1~6 固定 0，7~10 從 0 線性升到 2
     if (sensitivity <= 6) {
       wallThicken = 0
     } else {
-      const t2 = (sensitivity - 6) / 4  // 7→0.25, 8→0.5, 9→0.75, 10→1
+      const t2 = (sensitivity - 6) / 4
       wallThicken = lerp(0, 2, t2)
     }
   } else {
-    // 室外：靈敏度 1~7 固定 0，8~10 從 0 升到 3
-    if (sensitivity <= 7) {
+    if (sensitivity <= 8) {
       wallThicken = 0
     } else {
-      const t2 = (sensitivity - 7) / 3  // 8→0.33, 9→0.67, 10→1
-      wallThicken = lerp(0, 3, t2)
+      const t2 = (sensitivity - 8) / 2
+      wallThicken = lerp(0, 2, t2)
     }
   }
 
@@ -92,7 +84,7 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     pathColorTolerance: lerp(r.pathColorTolerance[0], r.pathColorTolerance[1], t),
     closingKernelSize,
     wallThicken,
-    sampleRadius:       lerp(r.sampleRadius[0], r.sampleRadius[1], t),
+    sampleRadius: lerp(r.sampleRadius[0], r.sampleRadius[1], t),
   }
 }
 
@@ -159,6 +151,7 @@ export const useMapStore = defineStore('map', () => {
     pathColor.value    = null
     startPoint.value   = null
     endPoint.value     = null
+    pathNodes.value    = []
   }
 
   function setSeedPoint(seed: Point | null) {
@@ -208,6 +201,58 @@ export const useMapStore = defineStore('map', () => {
     }
   }
 
+  // ============================================================
+  //  A* 最短路徑
+  // ============================================================
+
+  const pathNodes = ref<Point[]>([])
+
+  function runAStar(): number {
+    const wasm  = wasmModule.value
+    const start = startPoint.value
+    const end   = endPoint.value
+
+    if (!wasm || !isEngineReady.value) return 0
+    if (!start || !end) return 0
+
+    try {
+      const nodeCount: number = wasm.runAStar(
+        Math.round(start.x), Math.round(start.y),
+        Math.round(end.x),   Math.round(end.y)
+      )
+
+      if (nodeCount === 0) {
+        pathNodes.value = []
+        return 0
+      }
+
+      const ptr = wasm.getPathBuffer() as number
+
+      // 用 DataView 逐 byte 讀取，完全避開 Int32Array 的對齊限制
+      const heapBytes: Uint8Array = wasm.HEAPU8
+      const nodes: Point[] = []
+      for (let i = 0; i < nodeCount; i++) {
+        const base = ptr + i * 8  // 每對 (x, y) 各 4 bytes = 8 bytes
+        const x = heapBytes[base]!     | (heapBytes[base+1]! << 8)
+                | (heapBytes[base+2]! << 16) | (heapBytes[base+3]! << 24)
+        const y = heapBytes[base+4]!   | (heapBytes[base+5]! << 8)
+                | (heapBytes[base+6]! << 16) | (heapBytes[base+7]! << 24)
+        nodes.push({ x, y })
+      }
+      pathNodes.value = nodes
+      return nodeCount
+
+    } catch (err) {
+      console.error('runAStar 失敗:', err)
+      pathNodes.value = []
+      return 0
+    }
+  }
+
+  function clearPath() {
+    pathNodes.value = []
+  }
+
   return {
     imageRawData, mapWidth, mapHeight,
     startPoint, endPoint, seedPoint, pathColor,
@@ -215,5 +260,6 @@ export const useMapStore = defineStore('map', () => {
     setMapMode, setSensitivity, setFloodFillParams,
     setMapData, setPoints, setSeedPoint,
     wasmModule, isEngineReady, initEngine,
+    pathNodes, runAStar, clearPath,
   }
 })
