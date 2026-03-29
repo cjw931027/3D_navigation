@@ -9,6 +9,7 @@ const isRunning   = ref(false)
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
+const pathStatus = ref<string | null>(null)
 
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
@@ -52,69 +53,165 @@ function selectMode(mode: MapMode) {
   mapStore.setMapMode(mode)
 }
 
+function drawPath(ctx: CanvasRenderingContext2D) {
+  const nodes = mapStore.pathNodes
+  if (nodes.length < 2) return
+
+  // 黑色外框壓底
+  ctx.save()
+  ctx.globalCompositeOperation = 'destination-over'
+  ctx.beginPath()
+  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+  ctx.lineWidth   = 5
+  ctx.lineJoin    = 'round'
+  ctx.lineCap     = 'round'
+  ctx.stroke()
+  ctx.restore()
+
+  // 黃色主線
+  ctx.beginPath()
+  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  ctx.strokeStyle = '#FFD600'
+  ctx.lineWidth   = 3
+  ctx.lineJoin    = 'round'
+  ctx.lineCap     = 'round'
+  ctx.stroke()
+}
+
+function drawDot(ctx: CanvasRenderingContext2D, point: { x: number; y: number }, color: string, label: string) {
+  ctx.beginPath()
+  ctx.arc(point.x, point.y, 9, 0, Math.PI * 2)
+  ctx.fillStyle = 'white'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(point.x, point.y, 6, 0, Math.PI * 2)
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.fillStyle = color
+  ctx.font = 'bold 13px sans-serif'
+  ctx.fillText(label, point.x + 11, point.y - 5)
+}
+
+function drawOverlay(ctx: CanvasRenderingContext2D) {
+  if (mapStore.pathNodes.length >= 2) drawPath(ctx)
+  if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
+  if (mapStore.endPoint)   drawDot(ctx, mapStore.endPoint,   '#F44336', '終點')
+}
+
 const runFloodFill = () => {
   if (!mapStore.wasmModule) return alert('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
   if (!rawData || mapStore.mapWidth === 0) return alert('尚未載入地圖')
-  const seed = mapStore.seedPoint
-  if (!seed) return alert('缺少種子點，請回上傳頁重新標記')
+  if (!mapStore.seedPoint) return alert('缺少種子點，請回上傳頁重新標記')
 
   const width  = mapStore.mapWidth
   const height = mapStore.mapHeight
   const size   = rawData.length
   const p      = mapStore.floodFillParams
+  const seed   = mapStore.seedPoint
 
-  isRunning.value = true
-  const t0 = performance.now()
+  isRunning.value  = true
+  pathStatus.value = null
 
-  const pointer = mapStore.wasmModule.allocateMemory(size) as number
-  mapStore.wasmModule.HEAPU8.set(rawData, pointer)
+  try {
+    const t0 = performance.now()
 
-  const modeInt = mapStore.mapMode === 'outdoor' ? 1 : 0
+    const pointer = mapStore.wasmModule.allocateMemory(size) as number
+    mapStore.wasmModule.HEAPU8.set(rawData, pointer)
 
-  mapStore.wasmModule.intelligentFloodFill(
-    width, height,
-    seed.x, seed.y,
-    p.pathColorTolerance,
-    p.closingKernelSize,
-    p.wallThicken,
-    p.sampleRadius,
-    modeInt
-  )
+    const modeInt = mapStore.mapMode === 'outdoor' ? 1 : 0
+    mapStore.wasmModule.intelligentFloodFill(
+      width, height,
+      seed.x, seed.y,
+      p.pathColorTolerance,
+      p.closingKernelSize,
+      p.wallThicken,
+      p.sampleRadius,
+      modeInt
+    )
 
-  const resultData = new Uint8ClampedArray(
-    mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size
-  )
-  processTime.value = Math.round(performance.now() - t0)
-  mapStore.wasmModule.freeMemory()
+    // freeMemory 前先把像素結果複製出來
+    const resultBuffer = new Uint8ClampedArray(size)
+    resultBuffer.set(new Uint8ClampedArray(
+      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size
+    ))
 
-  const canvas = previewCanvas.value
-  if (!canvas) { isRunning.value = false; return }
-  canvas.width  = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) { isRunning.value = false; return }
+    // 釋放 mapBuffer（g_passableMask 在 WASM 全域仍存在）
+    mapStore.wasmModule.freeMemory()
 
-  ctx.putImageData(new ImageData(resultData, width, height), 0, 0)
+    processTime.value = Math.round(performance.now() - t0)
 
-  const drawDot = (point: { x: number; y: number }, color: string, label: string) => {
-    ctx.beginPath()
-    ctx.arc(point.x, point.y, 9, 0, Math.PI * 2)
-    ctx.fillStyle = 'white'
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(point.x, point.y, 6, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-    ctx.fillStyle = color
-    ctx.font = 'bold 13px sans-serif'
-    ctx.fillText(label, point.x + 11, point.y - 5)
+    // freeMemory 之後才執行 A*，避免 HEAPU8.buffer view 衝突
+    let nodeCount = 0
+    if (mapStore.startPoint && mapStore.endPoint) {
+      nodeCount = mapStore.runAStar()
+    }
+
+    // 渲染 canvas
+    const canvas = previewCanvas.value
+    if (!canvas) return
+    canvas.width  = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    ctx.putImageData(new ImageData(resultBuffer, width, height), 0, 0)
+    drawOverlay(ctx)
+
+    if (nodeCount > 0) {
+      pathStatus.value = `路徑長度 ${nodeCount} 格`
+    } else if (mapStore.startPoint && mapStore.endPoint) {
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
+    }
+
+  } catch (err) {
+    console.error('runFloodFill 失敗:', err)
+    pathStatus.value = '運算發生錯誤，請查看 console'
+  } finally {
+    isRunning.value = false
   }
+}
 
-  if (mapStore.startPoint) drawDot(mapStore.startPoint, '#4CAF50', '起點')
-  if (mapStore.endPoint)   drawDot(mapStore.endPoint,   '#F44336', '終點')
+// 不重跑 FloodFill，僅重算 A* 路徑
+const runAStarOnly = () => {
+  if (!mapStore.wasmModule || !mapStore.isEngineReady) return
+  if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
 
-  isRunning.value = false
+  isRunning.value  = true
+  pathStatus.value = null
+
+  try {
+    const nodeCount = mapStore.runAStar()
+
+    const canvas = previewCanvas.value
+    const ctx    = canvas?.getContext('2d')
+    if (ctx) {
+      const rawData = toRaw(mapStore.imageRawData)
+      if (rawData && mapStore.mapWidth > 0) {
+        ctx.putImageData(new ImageData(
+          new Uint8ClampedArray(rawData),
+          mapStore.mapWidth,
+          mapStore.mapHeight
+        ), 0, 0)
+      }
+      drawOverlay(ctx)
+    }
+
+    if (nodeCount > 0) {
+      pathStatus.value = `路徑長度 ${nodeCount} 格`
+    } else {
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
+    }
+
+  } catch (err) {
+    console.error('runAStarOnly 失敗:', err)
+    pathStatus.value = '運算發生錯誤，請查看 console'
+  } finally {
+    isRunning.value = false
+  }
 }
 </script>
 
@@ -174,7 +271,6 @@ const runFloodFill = () => {
                 min="1" max="10" step="1"
                 class="sensitivity-slider"
               />
-              <!-- 刻度標記 1~10 -->
               <div class="tick-row">
                 <span
                   v-for="n in 10" :key="n"
@@ -235,17 +331,37 @@ const runFloodFill = () => {
           </div>
         </div>
 
-        <!-- 執行 -->
-        <button
-          class="btn-run"
-          @click="runFloodFill"
-          :disabled="!mapStore.isEngineReady || isRunning"
-        >
-          {{ isRunning ? '運算中...' : '執行路徑識別' }}
-        </button>
+        <!-- 按鈕列 -->
+        <div class="btn-row">
+          <button
+            class="btn-run"
+            @click="runFloodFill"
+            :disabled="!mapStore.isEngineReady || isRunning"
+          >
+            {{ isRunning ? '運算中...' : '執行路徑識別' }}
+          </button>
+          <button
+            class="btn-astar"
+            @click="runAStarOnly"
+            :disabled="!mapStore.isEngineReady || isRunning || !mapStore.startPoint || !mapStore.endPoint"
+            title="不重跑遮罩，僅重算最短路徑"
+          >
+            重算路徑
+          </button>
+        </div>
 
-        <div class="result-time" v-if="processTime !== null">
-          耗時 <strong>{{ processTime }}</strong> 毫秒
+        <!-- 結果資訊列 -->
+        <div class="result-row" v-if="processTime !== null || pathStatus !== null">
+          <span class="result-time" v-if="processTime !== null">
+            耗時 <strong>{{ processTime }}</strong> 毫秒
+          </span>
+          <span
+            class="result-path"
+            :class="{ error: pathStatus?.startsWith('找不到') || pathStatus?.startsWith('運算') }"
+            v-if="pathStatus"
+          >
+            {{ pathStatus }}
+          </span>
         </div>
       </div>
 
@@ -294,7 +410,6 @@ h1 {
   text-align: left;
 }
 
-/* 路色 */
 .color-row { display: flex; margin-bottom: 18px; }
 
 .color-chip {
@@ -318,7 +433,6 @@ h1 {
   flex-shrink: 0;
 }
 
-/* 區塊標籤 */
 .section-label {
   font-size: 0.8em;
   font-weight: 700;
@@ -331,7 +445,6 @@ h1 {
   gap: 8px;
 }
 
-/* 模式 */
 .mode-row { display: flex; gap: 10px; }
 
 .mode-btn {
@@ -364,7 +477,6 @@ h1 {
 }
 .mode-btn.active .mode-desc { color: #5c8fc7; }
 
-/* 靈敏度 */
 .sens-badge {
   background: #1565c0;
   color: white;
@@ -406,7 +518,6 @@ h1 {
   accent-color: #1565c0;
 }
 
-/* 刻度列 */
 .tick-row {
   display: flex;
   justify-content: space-between;
@@ -437,7 +548,6 @@ h1 {
   padding: 0 34px;
 }
 
-/* 進階折疊 */
 .advanced-toggle {
   display: flex;
   align-items: center;
@@ -458,7 +568,6 @@ h1 {
 
 .advanced-panel { padding-top: 8px; margin-bottom: 14px; }
 
-/* 進階參數列 */
 .param-row { margin-bottom: 14px; }
 
 .param-label {
@@ -493,7 +602,6 @@ h1 {
   accent-color: #1565c0;
 }
 
-/* Tooltip */
 .tooltip-trigger {
   display: inline-flex;
   align-items: center;
@@ -528,10 +636,14 @@ h1 {
 .tooltip-box p { margin: 0 0 5px; }
 .tooltip-box p:last-child { margin: 0; }
 
-/* 執行按鈕 */
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .btn-run {
-  display: block;
-  width: 100%;
+  flex: 1;
   padding: 12px;
   font-size: 0.95em;
   font-weight: 700;
@@ -542,19 +654,45 @@ h1 {
   cursor: pointer;
   transition: background 0.2s;
   touch-action: manipulation;
-  margin-top: 6px;
 }
 .btn-run:hover:not(:disabled) { background: #0097a7; }
 .btn-run:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.result-time {
+.btn-astar {
+  padding: 12px 16px;
+  font-size: 0.88em;
+  font-weight: 700;
+  background: #1565c0;
+  color: white;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.2s;
+  touch-action: manipulation;
+  white-space: nowrap;
+}
+.btn-astar:hover:not(:disabled) { background: #0d47a1; }
+.btn-astar:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 10px;
   font-size: 0.85em;
-  color: #006064;
-  text-align: center;
+  flex-wrap: wrap;
 }
 
-/* Canvas */
+.result-time { color: #006064; }
+
+.result-path {
+  color: #1565c0;
+  font-weight: 500;
+}
+
+.result-path.error { color: #c62828; }
+
 .canvas-container { margin-top: 16px; }
 
 canvas {
