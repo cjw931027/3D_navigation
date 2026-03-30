@@ -9,7 +9,7 @@ const isRunning   = ref(false)
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
-const pathStatus = ref<string | null>(null)
+const pathStatus    = ref<string | null>(null)
 
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
@@ -91,14 +91,27 @@ function drawDot(ctx: CanvasRenderingContext2D, point: { x: number; y: number },
   ctx.fillStyle = color
   ctx.fill()
   ctx.fillStyle = color
-  ctx.font = 'bold 13px sans-serif'
+  ctx.font      = 'bold 13px sans-serif'
   ctx.fillText(label, point.x + 11, point.y - 5)
 }
 
+// 將路徑與起訖點標記疊加到 canvas
 function drawOverlay(ctx: CanvasRenderingContext2D) {
   if (mapStore.pathNodes.length >= 2) drawPath(ctx)
   if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
   if (mapStore.endPoint)   drawDot(ctx, mapStore.endPoint,   '#F44336', '終點')
+}
+
+// 把指定像素陣列渲染到 canvas，回傳 ctx（canvas 尺寸同時更新）
+function renderToCanvas(buffer: Uint8ClampedArray, width: number, height: number): CanvasRenderingContext2D | null {
+  const canvas = previewCanvas.value
+  if (!canvas) return null
+  canvas.width  = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(buffer as any, width, height), 0, 0)
+  return ctx
 }
 
 const runFloodFill = () => {
@@ -133,36 +146,27 @@ const runFloodFill = () => {
       modeInt
     )
 
-    // freeMemory 前先把像素結果複製出來
+    // freeMemory 前先把 FloodFill 結果完整複製出來並存入 store
     const resultBuffer = new Uint8ClampedArray(size)
     resultBuffer.set(new Uint8ClampedArray(
       mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size
     ))
+    mapStore.floodFillResultData = resultBuffer
 
-    // 釋放 mapBuffer（g_passableMask 在 WASM 全域仍存在）
     mapStore.wasmModule.freeMemory()
-
     processTime.value = Math.round(performance.now() - t0)
 
-    // freeMemory 之後才執行 A*，避免 HEAPU8.buffer view 衝突
+    // freeMemory 後才執行 A*（g_passableMask 仍在 WASM 全域）
     let nodeCount = 0
     if (mapStore.startPoint && mapStore.endPoint) {
       nodeCount = mapStore.runAStar()
     }
 
-    // 渲染 canvas
-    const canvas = previewCanvas.value
-    if (!canvas) return
-    canvas.width  = width
-    canvas.height = height
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    ctx.putImageData(new ImageData(resultBuffer, width, height), 0, 0)
-    drawOverlay(ctx)
+    const ctx = renderToCanvas(resultBuffer, width, height)
+    if (ctx) drawOverlay(ctx)
 
     if (nodeCount > 0) {
-      pathStatus.value = `路徑長度 ${nodeCount} 格`
+      pathStatus.value = `路徑長度 ${nodeCount} 段`
     } else if (mapStore.startPoint && mapStore.endPoint) {
       pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
@@ -175,10 +179,11 @@ const runFloodFill = () => {
   }
 }
 
-// 不重跑 FloodFill，僅重算 A* 路徑
+// 重算路徑：不重跑 FloodFill，底圖使用上次 FloodFill 的快取結果
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
   if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
+  if (!mapStore.floodFillResultData) return alert('請先執行一次路徑識別，再使用重算路徑')
 
   isRunning.value  = true
   pathStatus.value = null
@@ -186,22 +191,15 @@ const runAStarOnly = () => {
   try {
     const nodeCount = mapStore.runAStar()
 
-    const canvas = previewCanvas.value
-    const ctx    = canvas?.getContext('2d')
-    if (ctx) {
-      const rawData = toRaw(mapStore.imageRawData)
-      if (rawData && mapStore.mapWidth > 0) {
-        ctx.putImageData(new ImageData(
-          new Uint8ClampedArray(rawData),
-          mapStore.mapWidth,
-          mapStore.mapHeight
-        ), 0, 0)
-      }
-      drawOverlay(ctx)
-    }
+    const ctx = renderToCanvas(
+      mapStore.floodFillResultData,
+      mapStore.mapWidth,
+      mapStore.mapHeight
+    )
+    if (ctx) drawOverlay(ctx)
 
     if (nodeCount > 0) {
-      pathStatus.value = `路徑長度 ${nodeCount} 格`
+      pathStatus.value = `路徑長度 ${nodeCount} 段`
     } else {
       pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
@@ -343,8 +341,10 @@ const runAStarOnly = () => {
           <button
             class="btn-astar"
             @click="runAStarOnly"
-            :disabled="!mapStore.isEngineReady || isRunning || !mapStore.startPoint || !mapStore.endPoint"
-            title="不重跑遮罩，僅重算最短路徑"
+            :disabled="!mapStore.isEngineReady || isRunning
+                       || !mapStore.startPoint || !mapStore.endPoint
+                       || !mapStore.floodFillResultData"
+            title="保留目前識別結果，重新計算起訖點之間的最短路徑"
           >
             重算路徑
           </button>
