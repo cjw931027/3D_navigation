@@ -11,12 +11,9 @@ using namespace emscripten;
 
 uint8_t* mapBuffer = nullptr;
 
-// ============================================================
 //  A* 用：可通行遮罩全域快取
-//
 //  intelligentFloodFill 執行後，會將遮罩存入此緩衝區，
 //  供後續 runAStar 直接使用，不需重新建立遮罩。
-// ============================================================
 static std::vector<uint8_t>  g_passableMask;
 static int                   g_maskWidth  = 0;
 static int                   g_maskHeight = 0;
@@ -46,9 +43,7 @@ inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
 
 struct RGB { uint8_t r, g, b; };
 
-// ============================================================
 //  HSL 色彩空間
-// ============================================================
 struct HSL { float h, s, l; };
 
 HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
@@ -80,9 +75,7 @@ float hslDist(HSL a, HSL b) {
     return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
 }
 
-// ============================================================
 //  採色：取周圍 Top-K 眾數顏色
-// ============================================================
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -281,7 +274,6 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
 }
 
 //  intelligentFloodFill
-//  （與之前相同，新增：執行後將 mask 存入 g_passableMask）
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
                            int pathColorTolerance,
@@ -441,6 +433,12 @@ int getPathLength() {
     return (int)(g_pathBuffer.size() / 2);
 }
 
+// JS 存取可通行遮罩（供 JS 側直線化使用）
+int getPassableMaskBuffer()  { return (int)(intptr_t)(g_passableMask.data()); }
+int getPassableMaskSize()    { return (int)g_passableMask.size(); }
+int getPassableMaskWidth()   { return g_maskWidth;  }
+int getPassableMaskHeight()  { return g_maskHeight; }
+
 void floodFill(int width, int height, int seedX, int seedY, int tolerance) {
     if (mapBuffer == nullptr) return;
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
@@ -483,11 +481,15 @@ void floodFill(int width, int height, int seedX, int seedY, int tolerance) {
 }
 
 EMSCRIPTEN_BINDINGS(my_module) {
-    function("allocateMemory",       &allocateMemory);
-    function("freeMemory",           &freeMemory);
-    function("floodFill",            &floodFill);
-    function("intelligentFloodFill", &intelligentFloodFill);
-    function("runAStar",             &runAStar);
-    function("getPathBuffer",        &getPathBuffer);
-    function("getPathLength",        &getPathLength);
+    function("allocateMemory",        &allocateMemory);
+    function("freeMemory",            &freeMemory);
+    function("floodFill",             &floodFill);
+    function("intelligentFloodFill",  &intelligentFloodFill);
+    function("runAStar",              &runAStar);
+    function("getPathBuffer",         &getPathBuffer);
+    function("getPathLength",         &getPathLength);
+    function("getPassableMaskBuffer", &getPassableMaskBuffer);
+    function("getPassableMaskSize",   &getPassableMaskSize);
+    function("getPassableMaskWidth",  &getPassableMaskWidth);
+    function("getPassableMaskHeight", &getPassableMaskHeight);
 }
