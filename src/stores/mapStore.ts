@@ -88,6 +88,60 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   }
 }
 
+// ============================================================
+//  路徑直線化：Visibility-graph greedy shortcut
+//
+//  從起點開始，每次盡量往最遠可直達的節點跳，
+//  中間用 Bresenham line 逐像素檢查是否都在可通行遮罩內。
+//  結果只保留必要的轉折點，其餘全部省略。
+// ============================================================
+function straightenPath(
+  nodes: Point[],
+  mask: Uint8Array,
+  width: number,
+  height: number
+): Point[] {
+  if (nodes.length <= 2) return nodes
+
+  // Bresenham 直線可通行檢查
+  function linePassable(x0: number, y0: number, x1: number, y1: number): boolean {
+    let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0)
+    let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1
+    let err = dx - dy
+    let cx = x0, cy = y0
+    while (true) {
+      if (cx < 0 || cx >= width || cy < 0 || cy >= height) return false
+      if (mask[cy * width + cx] === 0) return false
+      if (cx === x1 && cy === y1) break
+      const e2 = err * 2
+      if (e2 > -dy) { err -= dy; cx += sx }
+      if (e2 <  dx) { err += dx; cy += sy }
+    }
+    return true
+  }
+
+  const result: Point[] = [nodes[0]!]
+  let cur = 0
+
+  while (cur < nodes.length - 1) {
+    // 從 cur 往後找最遠可直達的節點
+    let far = cur + 1
+    for (let j = nodes.length - 1; j > cur + 1; j--) {
+      if (linePassable(
+        Math.round(nodes[cur]!.x), Math.round(nodes[cur]!.y),
+        Math.round(nodes[j]!.x),   Math.round(nodes[j]!.y)
+      )) {
+        far = j
+        break
+      }
+    }
+    result.push(nodes[far]!)
+    cur = far
+  }
+
+  return result
+}
+
 export const useMapStore = defineStore('map', () => {
 
   const imageRawData = ref<Uint8ClampedArray | null>(null)
@@ -110,6 +164,9 @@ export const useMapStore = defineStore('map', () => {
 
   const wasmModule    = ref<any>(null)
   const isEngineReady = ref<boolean>(false)
+
+  // FloodFill 後的像素快取，供「重算路徑」時重繪底圖用
+  const floodFillResultData = ref<Uint8ClampedArray | null>(null)
 
   function applyComputed() {
     floodFillParams.value = computeParams(mapMode.value, sensitivity.value)
@@ -144,14 +201,15 @@ export const useMapStore = defineStore('map', () => {
   }
 
   function setMapData(data: Uint8ClampedArray, width: number, height: number) {
-    imageRawData.value = data
-    mapWidth.value     = width
-    mapHeight.value    = height
-    seedPoint.value    = null
-    pathColor.value    = null
-    startPoint.value   = null
-    endPoint.value     = null
-    pathNodes.value    = []
+    imageRawData.value        = data
+    mapWidth.value            = width
+    mapHeight.value           = height
+    seedPoint.value           = null
+    pathColor.value           = null
+    startPoint.value          = null
+    endPoint.value            = null
+    pathNodes.value           = []
+    floodFillResultData.value = null
   }
 
   function setSeedPoint(seed: Point | null) {
@@ -169,10 +227,10 @@ export const useMapStore = defineStore('map', () => {
   }
 
   function sampleDominantColor(point: Point, radius: number): ColorRGB {
-    const data      = imageRawData.value!
-    const width     = mapWidth.value
-    const height    = mapHeight.value
-    const freq      = new Map<number, number>()
+    const data       = imageRawData.value!
+    const width      = mapWidth.value
+    const height     = mapHeight.value
+    const freq       = new Map<number, number>()
     const quantShift = mapMode.value === 'outdoor' ? 2 : 3
 
     for (let dy = -radius; dy <= radius; dy++) {
@@ -227,20 +285,28 @@ export const useMapStore = defineStore('map', () => {
       }
 
       const ptr = wasm.getPathBuffer() as number
-
-      // 用 DataView 逐 byte 讀取，完全避開 Int32Array 的對齊限制
       const heapBytes: Uint8Array = wasm.HEAPU8
-      const nodes: Point[] = []
+
+      const raw: Point[] = []
       for (let i = 0; i < nodeCount; i++) {
-        const base = ptr + i * 8  // 每對 (x, y) 各 4 bytes = 8 bytes
+        const base = ptr + i * 8
         const x = heapBytes[base]!     | (heapBytes[base+1]! << 8)
                 | (heapBytes[base+2]! << 16) | (heapBytes[base+3]! << 24)
         const y = heapBytes[base+4]!   | (heapBytes[base+5]! << 8)
                 | (heapBytes[base+6]! << 16) | (heapBytes[base+7]! << 24)
-        nodes.push({ x, y })
+        raw.push({ x, y })
       }
-      pathNodes.value = nodes
-      return nodeCount
+
+      // 用 g_passableMask 對路徑做直線化
+      // getPassableMask() 回傳遮罩的 byte offset 與長度
+      const maskPtr    = wasm.getPassableMaskBuffer() as number
+      const maskLen    = wasm.getPassableMaskSize()   as number
+      const maskW      = wasm.getPassableMaskWidth()  as number
+      const maskH      = wasm.getPassableMaskHeight() as number
+      const maskBytes  = heapBytes.subarray(maskPtr, maskPtr + maskLen)
+
+      pathNodes.value = straightenPath(raw, maskBytes, maskW, maskH)
+      return pathNodes.value.length
 
     } catch (err) {
       console.error('runAStar 失敗:', err)
@@ -261,5 +327,6 @@ export const useMapStore = defineStore('map', () => {
     setMapData, setPoints, setSeedPoint,
     wasmModule, isEngineReady, initEngine,
     pathNodes, runAStar, clearPath,
+    floodFillResultData,
   }
 })
