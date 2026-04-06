@@ -165,6 +165,11 @@ export const useMapStore = defineStore('map', () => {
   const wasmModule    = ref<any>(null)
   const isEngineReady = ref<boolean>(false)
 
+  // 前處理開關
+  const normalizeLighting = ref<boolean>(false)  // 光影均一化
+  const denoiseMinArea    = ref<number>(80)       // 噪點清除面積門檻（0 = 關閉）
+  const enableDenoise     = ref<boolean>(true)    // 噪點清除總開關
+
   // FloodFill 後的像素快取，供「重算路徑」時重繪底圖用
   const floodFillResultData = ref<Uint8ClampedArray | null>(null)
 
@@ -328,5 +333,6 @@ export const useMapStore = defineStore('map', () => {
     wasmModule, isEngineReady, initEngine,
     pathNodes, runAStar, clearPath,
     floodFillResultData,
+    normalizeLighting, denoiseMinArea, enableDenoise,
   }
 })
