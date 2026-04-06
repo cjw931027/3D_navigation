@@ -135,7 +135,9 @@ const runFloodFill = () => {
     const pointer = mapStore.wasmModule.allocateMemory(size) as number
     mapStore.wasmModule.HEAPU8.set(rawData, pointer)
 
-    const modeInt = mapStore.mapMode === 'outdoor' ? 1 : 0
+    const modeInt      = mapStore.mapMode === 'outdoor' ? 1 : 0
+    const normInt      = mapStore.normalizeLighting ? 1 : 0
+    const denoiseArea  = mapStore.enableDenoise ? mapStore.denoiseMinArea : 0
     mapStore.wasmModule.intelligentFloodFill(
       width, height,
       seed.x, seed.y,
@@ -143,7 +145,9 @@ const runFloodFill = () => {
       p.closingKernelSize,
       p.wallThicken,
       p.sampleRadius,
-      modeInt
+      modeInt,
+      normInt,
+      denoiseArea
     )
 
     // freeMemory 前先把 FloodFill 結果完整複製出來並存入 store
@@ -326,6 +330,50 @@ const runAStarOnly = () => {
               :max="paramConfig[key]!.max"
               :step="paramConfig[key]!.step"
             />
+          </div>
+
+          <!-- 前處理開關 -->
+          <div class="preprocess-section">
+            <div class="preprocess-label">前處理選項</div>
+
+            <div class="toggle-row">
+              <label class="toggle-label">
+                <input
+                  type="checkbox"
+                  :checked="mapStore.normalizeLighting"
+                  @change="mapStore.normalizeLighting = ($event.target as HTMLInputElement).checked"
+                />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                光影均一化
+              </label>
+              <span class="toggle-hint">消除光源不均（陰影、逆光）對採色的干擾，適合光線複雜的地圖</span>
+            </div>
+
+            <div class="toggle-row">
+              <label class="toggle-label">
+                <input
+                  type="checkbox"
+                  :checked="mapStore.enableDenoise"
+                  @change="mapStore.enableDenoise = ($event.target as HTMLInputElement).checked"
+                />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                路面噪點清除
+              </label>
+              <span class="toggle-hint">自動移除路面上的小圖示、文字與箭頭（可減少識別中斷）</span>
+            </div>
+
+            <div class="param-row" v-if="mapStore.enableDenoise">
+              <div class="param-label">
+                <span class="param-name">噪點門檻（像素數）</span>
+                <strong>{{ mapStore.denoiseMinArea }}</strong>
+              </div>
+              <input
+                type="range"
+                :value="mapStore.denoiseMinArea"
+                @input="mapStore.denoiseMinArea = Number(($event.target as HTMLInputElement).value)"
+                min="20" max="400" step="10"
+              />
+            </div>
           </div>
         </div>
 
@@ -701,5 +749,85 @@ canvas {
   border-radius: 8px;
   background: white;
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+/* 前處理區 */
+.preprocess-section {
+  border-top: 1px solid #e8e8e8;
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
+.preprocess-label {
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #aaa;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 12px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.88em;
+  font-weight: 600;
+  color: #333;
+  user-select: none;
+}
+
+/* 隱藏原生 checkbox */
+.toggle-label input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 20px;
+  background: #ccc;
+  border-radius: 10px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-label input:checked + .toggle-track {
+  background: #1565c0;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.toggle-label input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(14px);
+}
+
+.toggle-hint {
+  font-size: 0.74em;
+  color: #999;
+  line-height: 1.4;
+  padding-left: 42px;
 }
 </style>
