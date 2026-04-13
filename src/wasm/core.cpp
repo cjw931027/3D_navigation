@@ -273,151 +273,62 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
     return mask;
 }
 
+
+
 // ============================================================
-//  前處理 1：光影均一化
+//  後處理：遮罩連通域面積過濾
 //
-//  將圖片轉換到 LAB 色彩空間，用局部平均亮度做歸一化，
-//  消除因光源不均（室內陰影、室外逆光）造成的亮度差異。
-//  blockSize：局部區塊大小（建議 64），越大消除範圍越廣。
-// ============================================================
-void normalizeLight(int width, int height, int blockSize) {
-    int total = width * height;
-
-    // 計算每個像素的感知亮度（0.299R + 0.587G + 0.114B）
-    std::vector<float> lum(total);
-    for (int i = 0; i < total; i++) {
-        float r = mapBuffer[i*4]   / 255.0f;
-        float g = mapBuffer[i*4+1] / 255.0f;
-        float b = mapBuffer[i*4+2] / 255.0f;
-        lum[i] = 0.299f * r + 0.587f * g + 0.114f * b;
-    }
-
-    // 計算每個像素的局部平均亮度（box blur 近似）
-    std::vector<float> localAvg(total, 0.0f);
-    int half = blockSize / 2;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            float sum = 0.0f;
-            int cnt = 0;
-            int y0 = std::max(0, y - half), y1 = std::min(height - 1, y + half);
-            int x0 = std::max(0, x - half), x1 = std::min(width  - 1, x + half);
-            for (int yy = y0; yy <= y1; yy += 4)
-                for (int xx = x0; xx <= x1; xx += 4) {
-                    sum += lum[yy * width + xx];
-                    cnt++;
-                }
-            localAvg[y * width + x] = (cnt > 0) ? sum / cnt : 0.5f;
-        }
-    }
-
-    // 用局部亮度歸一化：pixel_out = pixel_in / localAvg * globalTarget
-    float globalTarget = 0.72f;
-    for (int i = 0; i < total; i++) {
-        float avg = localAvg[i];
-        if (avg < 0.05f) avg = 0.05f;
-        float scale = globalTarget / avg;
-        // 只調整亮度，保持色相不變：對 RGB 同比例縮放
-        float nr = std::min(1.0f, mapBuffer[i*4]   / 255.0f * scale);
-        float ng = std::min(1.0f, mapBuffer[i*4+1] / 255.0f * scale);
-        float nb = std::min(1.0f, mapBuffer[i*4+2] / 255.0f * scale);
-        mapBuffer[i*4]   = (uint8_t)(nr * 255);
-        mapBuffer[i*4+1] = (uint8_t)(ng * 255);
-        mapBuffer[i*4+2] = (uint8_t)(nb * 255);
-    }
-}
-
-// ============================================================
-//  前處理 2：小圖案噪點清除
+//  對可通行遮罩（0/1 的 uint8_t vector）做 4-連通 BFS 標注，
+//  將面積小於 minArea 的孤立連通域一律設為不可通行（0）。
 //
-//  對圖片做連通區域分析（4-連通 BFS），找出面積小於
-//  minArea 的孤立色塊（文字、箭頭、小圖示），把它們的
-//  顏色替換成周圍像素的眾數顏色，使其融入背景。
-//  minArea：低於此像素數的連通區域才會被清除（建議 80）。
-//  tolSq：判斷「相同色塊」的 RGB 距離平方容差（建議 900=30^2）。
+//  用途：清除 BFS 洪水填充後，因顏色容差或影像雜訊產生的
+//  破碎小區塊，讓遮罩更整潔，A* 路徑品質更穩定。
+//  比調整 pathColorTolerance 更不容易誤傷主走廊。
 // ============================================================
-void removeNoise(int width, int height, int minArea, int tolSq) {
+void removeSmallMaskComponents(std::vector<uint8_t>& mask,
+                                int width, int height, int minArea) {
     int total = width * height;
-    std::vector<int> label(total, -1);
-    int nextLabel = 0;
-
-    std::vector<std::vector<int>> regions;
+    std::vector<bool> visited(total, false);
 
     const int dx4[] = {0, 0, -1, 1};
     const int dy4[] = {-1, 1,  0, 0};
 
-    // BFS 分割：把顏色相近的相鄰像素歸入同一連通區域
     for (int start = 0; start < total; start++) {
-        if (label[start] != -1) continue;
-        int sx = start % width, sy = start / width;
-        uint8_t sr = mapBuffer[start*4], sg = mapBuffer[start*4+1], sb = mapBuffer[start*4+2];
+        if (visited[start] || mask[start] == 0) continue;
 
-        std::vector<int> region;
+        // BFS 收集整個連通域
+        std::vector<int> component;
         std::vector<int> queue;
+        queue.reserve(minArea * 2);
         queue.push_back(start);
-        label[start] = nextLabel;
+        visited[start] = true;
 
         for (int head = 0; head < (int)queue.size(); head++) {
             int cur = queue[head];
-            region.push_back(cur);
+            component.push_back(cur);
             int cx = cur % width, cy = cur / width;
             for (int d = 0; d < 4; d++) {
                 int nx = cx + dx4[d], ny = cy + dy4[d];
                 if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
                 int ni = ny * width + nx;
-                if (label[ni] != -1) continue;
-                uint8_t nr = mapBuffer[ni*4], ng = mapBuffer[ni*4+1], nb = mapBuffer[ni*4+2];
-                if (colorDistSq(sr, sg, sb, nr, ng, nb) <= tolSq) {
-                    label[ni] = nextLabel;
+                if (!visited[ni] && mask[ni] == 1) {
+                    visited[ni] = true;
                     queue.push_back(ni);
                 }
             }
         }
-        regions.push_back(region);
-        nextLabel++;
-    }
 
-    // 對面積小於 minArea 的區域，把顏色替換成鄰近大區域的主色
-    for (auto& region : regions) {
-        if ((int)region.size() >= minArea) continue;
-
-        // 統計邊界外一圈像素的眾數顏色
-        std::unordered_map<uint32_t, int> freq;
-        for (int idx : region) {
-            int cx = idx % width, cy = idx / width;
-            for (int d = 0; d < 4; d++) {
-                int nx = cx + dx4[d], ny = cy + dy4[d];
-                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-                int ni = ny * width + nx;
-                // 只採不屬於本區域的鄰居
-                if (label[ni] == label[idx]) continue;
-                uint8_t r = (mapBuffer[ni*4]   >> 3) << 3;
-                uint8_t g = (mapBuffer[ni*4+1] >> 3) << 3;
-                uint8_t b = (mapBuffer[ni*4+2] >> 3) << 3;
-                uint32_t key = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-                freq[key]++;
-            }
-        }
-
-        if (freq.empty()) continue;
-        uint32_t best = 0; int bestCnt = 0;
-        for (auto& kv : freq)
-            if (kv.second > bestCnt) { bestCnt = kv.second; best = kv.first; }
-
-        uint8_t fr = (best >> 16) & 0xFF;
-        uint8_t fg = (best >>  8) & 0xFF;
-        uint8_t fb =  best        & 0xFF;
-        for (int idx : region) {
-            mapBuffer[idx*4]   = fr;
-            mapBuffer[idx*4+1] = fg;
-            mapBuffer[idx*4+2] = fb;
+        // 面積未達閾值 → 清除（設為不可通行）
+        if ((int)component.size() < minArea) {
+            for (int idx : component) mask[idx] = 0;
         }
     }
 }
 
 //  intelligentFloodFill
 //  新增參數：
-//    normalizelighting (int) — 1 = 執行光影均一化，0 = 跳過
-//    denoiseMinArea    (int) — > 0 = 清除小於此面積的噪點色塊，0 = 跳過
+//    normalizelighting (int) — 保留參數（已移除光影均一化功能，傳 0 即可）
+//    denoiseMinArea    (int) — > 0 = 清除遮罩中面積過小的連通域，0 = 跳過
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
                            int pathColorTolerance,
@@ -429,16 +340,6 @@ void intelligentFloodFill(int width, int height,
                            int denoiseMinArea) {
     if (mapBuffer == nullptr) return;
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
-
-    // 前處理 1：光影均一化（可選）
-    if (normalizelighting) {
-        normalizeLight(width, height, 64);
-    }
-
-    // 前處理 2：小噪點清除（可選，minArea > 0 時啟用）
-    if (denoiseMinArea > 0) {
-        removeNoise(width, height, denoiseMinArea, 900);
-    }
 
     std::vector<uint8_t> mask;
 
@@ -467,6 +368,11 @@ void intelligentFloodFill(int width, int height,
         int tolSq = pathColorTolerance * pathColorTolerance;
         mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
                                      closingKernelSize, wallThicken);
+    }
+
+    // 後處理：清除遮罩中面積過小的孤立連通域（破碎小區塊）
+    if (denoiseMinArea > 0) {
+        removeSmallMaskComponents(mask, width, height, denoiseMinArea);
     }
 
     int searchR = 12 + wallThicken * 3;
@@ -641,8 +547,6 @@ EMSCRIPTEN_BINDINGS(my_module) {
     function("freeMemory",            &freeMemory);
     function("floodFill",             &floodFill);
     function("intelligentFloodFill",  &intelligentFloodFill);
-    function("normalizeLight",        &normalizeLight);
-    function("removeNoise",           &removeNoise);
     function("runAStar",              &runAStar);
     function("getPathBuffer",         &getPathBuffer);
     function("getPathLength",         &getPathLength);
