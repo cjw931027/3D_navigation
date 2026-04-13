@@ -16,6 +16,55 @@ export interface FloodFillParams {
 
 export type MapMode = 'indoor' | 'outdoor'
 
+// ============================================================
+//  地圖類型：色塊圖 (BFS) vs 線稿圖 (YOLO)
+// ============================================================
+export type MapType = 'color-block' | 'line-art'
+
+/** 偵測閾值：彩色像素佔比超過此值 → 色塊圖 */
+const COLOR_PIXEL_THRESHOLD = 0.05
+
+/**
+ * 分析 imageRawData 中彩色像素（有色相、非黑非白）佔全圖的比例。
+ *
+ * 判定標準（HSV 近似）：
+ *   max(R,G,B) - min(R,G,B) > 30  → 有足夠色差（排除灰色）
+ *   max(R,G,B) > 30               → 非近黑
+ *
+ * 效能：stride=4 對每 4 個像素取 1 樣，1200×1200 圖約掃 360K 次，
+ * 純整數運算，實測 < 10ms。
+ *
+ * @returns 0–1 之間的彩色像素比例
+ */
+function calcColorPixelRatio(
+  data: Uint8ClampedArray,
+  pixelCount: number
+): number {
+  const CHROMA_MIN = 30  // max-min 差值下限（排除灰階）
+  const VALUE_MIN  = 30  // 亮度下限（排除近黑）
+  const STRIDE     = 4   // 每隔幾個像素取樣一次
+
+  let chromatic = 0
+  let sampled   = 0
+
+  for (let p = 0; p < pixelCount; p += STRIDE) {
+    const i = p * 4
+    const r = data[i]!
+    const g = data[i + 1]!
+    const b = data[i + 2]!
+
+    const maxC = r > g ? (r > b ? r : b) : (g > b ? g : b)
+    const minC = r < g ? (r < b ? r : b) : (g < b ? g : b)
+
+    if (maxC > VALUE_MIN && maxC - minC > CHROMA_MIN) chromatic++
+    sampled++
+  }
+
+  return sampled > 0 ? chromatic / sampled : 0
+}
+
+// ============================================================
+
 interface ModeRange {
   defaultSensitivity: number
   pathColorTolerance: [number, number]
@@ -173,6 +222,38 @@ export const useMapStore = defineStore('map', () => {
   // FloodFill 後的像素快取，供「重算路徑」時重繪底圖用
   const floodFillResultData = ref<Uint8ClampedArray | null>(null)
 
+  // ============================================================
+  //  地圖類型自動偵測
+  // ============================================================
+
+  /** 自動偵測到的地圖類型（不受手動覆蓋影響） */
+  const mapTypeAuto = ref<MapType>('color-block')
+
+  /** 目前生效的地圖類型（可被使用者手動覆蓋） */
+  const mapType = ref<MapType>('color-block')
+
+  /** 彩色像素佔比（0–1），供 UI 顯示置信度用 */
+  const colorPixelRatio = ref<number>(0)
+
+  /** 使用者是否已手動覆蓋自動偵測結果 */
+  const mapTypeOverridden = ref<boolean>(false)
+
+  /**
+   * 手動設定地圖類型（覆蓋自動偵測）。
+   * 傳入 null 可還原為自動偵測結果。
+   */
+  function setMapType(type: MapType | null) {
+    if (type === null) {
+      mapType.value          = mapTypeAuto.value
+      mapTypeOverridden.value = false
+    } else {
+      mapType.value          = type
+      mapTypeOverridden.value = type !== mapTypeAuto.value
+    }
+  }
+
+  // ============================================================
+
   function applyComputed() {
     floodFillParams.value = computeParams(mapMode.value, sensitivity.value)
   }
@@ -215,6 +296,15 @@ export const useMapStore = defineStore('map', () => {
     endPoint.value            = null
     pathNodes.value           = []
     floodFillResultData.value = null
+
+    // ── 自動偵測地圖類型 ──────────────────────────────────
+    const ratio = calcColorPixelRatio(data, width * height)
+    colorPixelRatio.value   = ratio
+    const detected: MapType = ratio > COLOR_PIXEL_THRESHOLD ? 'color-block' : 'line-art'
+    mapTypeAuto.value       = detected
+    mapType.value           = detected       // 重置為自動偵測值
+    mapTypeOverridden.value = false
+    // ─────────────────────────────────────────────────────
   }
 
   function setSeedPoint(seed: Point | null) {
@@ -334,5 +424,7 @@ export const useMapStore = defineStore('map', () => {
     pathNodes, runAStar, clearPath,
     floodFillResultData,
     normalizeLighting, denoiseMinArea, enableDenoise,
+    // 地圖類型
+    mapType, mapTypeAuto, colorPixelRatio, mapTypeOverridden, setMapType,
   }
 })
