@@ -136,8 +136,8 @@ const runFloodFill = () => {
     mapStore.wasmModule.HEAPU8.set(rawData, pointer)
 
     const modeInt      = mapStore.mapMode === 'outdoor' ? 1 : 0
-    const normInt      = mapStore.normalizeLighting ? 1 : 0
-    const denoiseArea  = mapStore.enableDenoise ? mapStore.denoiseMinArea : 0
+    const normInt      = 0
+    const denoiseArea  = mapStore.denoiseMinArea
     mapStore.wasmModule.intelligentFloodFill(
       width, height,
       seed.x, seed.y,
@@ -332,47 +332,21 @@ const runAStarOnly = () => {
             />
           </div>
 
-          <!-- 前處理開關 -->
+          <!-- 遮罩過濾 -->
           <div class="preprocess-section">
-            <div class="preprocess-label">前處理選項</div>
-
-            <div class="toggle-row">
-              <label class="toggle-label">
-                <input
-                  type="checkbox"
-                  :checked="mapStore.normalizeLighting"
-                  @change="mapStore.normalizeLighting = ($event.target as HTMLInputElement).checked"
-                />
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                光影均一化
-              </label>
-              <span class="toggle-hint">消除光源不均（陰影、逆光）對採色的干擾，適合光線複雜的地圖</span>
-            </div>
-
-            <div class="toggle-row">
-              <label class="toggle-label">
-                <input
-                  type="checkbox"
-                  :checked="mapStore.enableDenoise"
-                  @change="mapStore.enableDenoise = ($event.target as HTMLInputElement).checked"
-                />
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                路面噪點清除
-              </label>
-              <span class="toggle-hint">自動移除路面上的小圖示、文字與箭頭（可減少識別中斷）</span>
-            </div>
-
-            <div class="param-row" v-if="mapStore.enableDenoise">
+            <div class="preprocess-label">遮罩過濾</div>
+            <div class="param-row">
               <div class="param-label">
-                <span class="param-name">噪點門檻（像素數）</span>
+                <span class="param-name">破碎區塊門檻（像素數）</span>
                 <strong>{{ mapStore.denoiseMinArea }}</strong>
               </div>
               <input
                 type="range"
                 :value="mapStore.denoiseMinArea"
                 @input="mapStore.denoiseMinArea = Number(($event.target as HTMLInputElement).value)"
-                min="20" max="400" step="10"
+                min="0" max="400" step="10"
               />
+              <span class="toggle-hint">BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉</span>
             </div>
           </div>
         </div>
