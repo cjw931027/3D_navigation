@@ -57,7 +57,6 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
 
-  // 黑色外框壓底
   ctx.save()
   ctx.globalCompositeOperation = 'destination-over'
   ctx.beginPath()
@@ -70,7 +69,6 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   ctx.stroke()
   ctx.restore()
 
-  // 黃色主線
   ctx.beginPath()
   ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
   for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
@@ -95,14 +93,12 @@ function drawDot(ctx: CanvasRenderingContext2D, point: { x: number; y: number },
   ctx.fillText(label, point.x + 11, point.y - 5)
 }
 
-// 將路徑與起訖點標記疊加到 canvas
 function drawOverlay(ctx: CanvasRenderingContext2D) {
   if (mapStore.pathNodes.length >= 2) drawPath(ctx)
   if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
   if (mapStore.endPoint)   drawDot(ctx, mapStore.endPoint,   '#F44336', '終點')
 }
 
-// 把指定像素陣列渲染到 canvas，回傳 ctx（canvas 尺寸同時更新）
 function renderToCanvas(buffer: Uint8ClampedArray, width: number, height: number): CanvasRenderingContext2D | null {
   const canvas = previewCanvas.value
   if (!canvas) return null
@@ -122,9 +118,13 @@ const runFloodFill = () => {
 
   const width  = mapStore.mapWidth
   const height = mapStore.mapHeight
-  const size   = rawData.length
   const p      = mapStore.floodFillParams
   const seed   = mapStore.seedPoint
+  const up     = mapStore.upscaleFactor
+
+  const W2 = width  * up
+  const H2 = height * up
+  const size2 = W2 * H2 * 4
 
   isRunning.value  = true
   pathStatus.value = null
@@ -132,15 +132,36 @@ const runFloodFill = () => {
   try {
     const t0 = performance.now()
 
-    const pointer = mapStore.wasmModule.allocateMemory(size) as number
-    mapStore.wasmModule.HEAPU8.set(rawData, pointer)
+    // 最近鄰上採樣，放大後的 buffer 送 WASM。
+    let sendData: Uint8ClampedArray
+    if (up === 1) {
+      sendData = rawData
+    } else {
+      sendData = new Uint8ClampedArray(size2)
+      for (let y = 0; y < H2; y++) {
+        const sy = (y / up) | 0
+        for (let x = 0; x < W2; x++) {
+          const sx = (x / up) | 0
+          const si = (sy * width + sx) * 4
+          const di = (y  * W2    + x ) * 4
+          sendData[di]     = rawData[si]!
+          sendData[di + 1] = rawData[si + 1]!
+          sendData[di + 2] = rawData[si + 2]!
+          sendData[di + 3] = rawData[si + 3]!
+        }
+      }
+    }
 
-    const modeInt      = mapStore.mapMode === 'outdoor' ? 1 : 0
+    const pointer = mapStore.wasmModule.allocateMemory(size2) as number
+    mapStore.wasmModule.HEAPU8.set(sendData, pointer)
+
+    // mode: 0 = 色塊圖 RGB，1 = 線稿圖 HSL。
+    const modeInt      = mapStore.mapType === 'line-art' ? 1 : 0
     const normInt      = 0
-    const denoiseArea  = mapStore.denoiseMinArea
+    const denoiseArea  = mapStore.denoiseMinArea * up * up
     mapStore.wasmModule.intelligentFloodFill(
-      width, height,
-      seed.x, seed.y,
+      W2, H2,
+      Math.round(seed.x * up), Math.round(seed.y * up),
       p.pathColorTolerance,
       p.closingKernelSize,
       p.wallThicken,
@@ -150,23 +171,42 @@ const runFloodFill = () => {
       denoiseArea
     )
 
-    // freeMemory 前先把 FloodFill 結果完整複製出來並存入 store
-    const resultBuffer = new Uint8ClampedArray(size)
-    resultBuffer.set(new Uint8ClampedArray(
-      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size
+    // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
+    const resultUp = new Uint8ClampedArray(size2)
+    resultUp.set(new Uint8ClampedArray(
+      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size2
     ))
-    mapStore.floodFillResultData = resultBuffer
+
+    let displayBuffer: Uint8ClampedArray
+    if (up === 1) {
+      displayBuffer = resultUp
+    } else {
+      displayBuffer = new Uint8ClampedArray(width * height * 4)
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const sx = x * up
+          const sy = y * up
+          const si = (sy * W2 + sx) * 4
+          const di = (y  * width + x) * 4
+          displayBuffer[di]     = resultUp[si]!
+          displayBuffer[di + 1] = resultUp[si + 1]!
+          displayBuffer[di + 2] = resultUp[si + 2]!
+          displayBuffer[di + 3] = resultUp[si + 3]!
+        }
+      }
+    }
+    mapStore.floodFillResultData = displayBuffer
 
     mapStore.wasmModule.freeMemory()
     processTime.value = Math.round(performance.now() - t0)
 
-    // freeMemory 後才執行 A*（g_passableMask 仍在 WASM 全域）
+    // g_passableMask 位於 WASM 全域，freeMemory 後仍可供 A* 使用。
     let nodeCount = 0
     if (mapStore.startPoint && mapStore.endPoint) {
       nodeCount = mapStore.runAStar()
     }
 
-    const ctx = renderToCanvas(resultBuffer, width, height)
+    const ctx = renderToCanvas(displayBuffer, width, height)
     if (ctx) drawOverlay(ctx)
 
     if (nodeCount > 0) {
@@ -183,7 +223,6 @@ const runFloodFill = () => {
   }
 }
 
-// 重算路徑：不重跑 FloodFill，底圖使用上次 FloodFill 的快取結果
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
   if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
