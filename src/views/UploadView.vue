@@ -1,18 +1,10 @@
 <script setup lang="ts">
-import { ref, shallowRef, computed, onMounted, onUnmounted, toRaw, nextTick } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted, toRaw, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMapStore } from '@/stores/mapStore'
 
 const mapStore = useMapStore()
 const router = useRouter()
-
-// ── 地圖類型顯示用 ─────────────────────────────────────────
-const mapTypeLabel = computed(() =>
-  mapStore.mapType === 'color-block' ? '色塊圖　→　BFS' : '線稿圖　→　YOLO'
-)
-const mapTypeBadgeClass = computed(() =>
-  mapStore.mapType === 'color-block' ? 'badge-color' : 'badge-line'
-)
 
 const mapCanvas     = ref<HTMLCanvasElement | null>(null)
 const canvasWrapper = ref<HTMLDivElement | null>(null)
@@ -469,12 +461,8 @@ const goToProcess = () => router.push('/')
       </div>
     </div>
 
-    <!-- 地圖類型偵測結果 -->
     <div class="map-type-row" v-if="mapStore.imageRawData">
       <span class="type-label">地圖類型</span>
-      <span class="type-badge" :class="mapTypeBadgeClass">{{ mapTypeLabel }}</span>
-      <span class="type-ratio">彩色像素 {{ (mapStore.colorPixelRatio * 100).toFixed(1) }}%</span>
-      <span v-if="mapStore.mapTypeOverridden" class="type-overridden">（手動覆蓋）</span>
       <div class="type-toggle">
         <button
           class="btn-type"
@@ -486,11 +474,6 @@ const goToProcess = () => router.push('/')
           :class="{ active: mapStore.mapType === 'line-art' }"
           @click="mapStore.setMapType('line-art')"
         >線稿圖</button>
-        <button
-          v-if="mapStore.mapTypeOverridden"
-          class="btn-type btn-reset-type"
-          @click="mapStore.setMapType(null)"
-        >還原自動</button>
       </div>
     </div>
 
