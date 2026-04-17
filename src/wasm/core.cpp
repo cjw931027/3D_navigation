@@ -11,15 +11,12 @@ using namespace emscripten;
 
 uint8_t* mapBuffer = nullptr;
 
-//  A* 用：可通行遮罩全域快取
-//  intelligentFloodFill 執行後，會將遮罩存入此緩衝區，
-//  供後續 runAStar 直接使用，不需重新建立遮罩。
+// intelligentFloodFill 建好的遮罩保留給後續 runAStar 使用。
 static std::vector<uint8_t>  g_passableMask;
 static int                   g_maskWidth  = 0;
 static int                   g_maskHeight = 0;
 
-// A* 路徑結果緩衝區（交替存 x,y：x0,y0,x1,y1,...）
-// JS 透過 getPathBuffer() 取得指標後用 Int32Array 直接讀取。
+// 路徑以 x0,y0,x1,y1,... 交錯存放，JS 以 Int32Array 讀取。
 static std::vector<int32_t>  g_pathBuffer;
 
 int allocateMemory(int size) {
@@ -43,7 +40,6 @@ inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
 
 struct RGB { uint8_t r, g, b; };
 
-//  HSL 色彩空間
 struct HSL { float h, s, l; };
 
 HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
@@ -75,7 +71,6 @@ float hslDist(HSL a, HSL b) {
     return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
 }
 
-//  採色：取周圍 Top-K 眾數顏色
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -275,16 +270,7 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
 
 
 
-// ============================================================
-//  後處理：遮罩連通域面積過濾
-//
-//  對可通行遮罩（0/1 的 uint8_t vector）做 4-連通 BFS 標注，
-//  將面積小於 minArea 的孤立連通域一律設為不可通行（0）。
-//
-//  用途：清除 BFS 洪水填充後，因顏色容差或影像雜訊產生的
-//  破碎小區塊，讓遮罩更整潔，A* 路徑品質更穩定。
-//  比調整 pathColorTolerance 更不容易誤傷主走廊。
-// ============================================================
+// 清除遮罩中面積小於 minArea 的孤立連通域，避免雜訊碎塊干擾 A*。
 void removeSmallMaskComponents(std::vector<uint8_t>& mask,
                                 int width, int height, int minArea) {
     int total = width * height;
@@ -296,7 +282,6 @@ void removeSmallMaskComponents(std::vector<uint8_t>& mask,
     for (int start = 0; start < total; start++) {
         if (visited[start] || mask[start] == 0) continue;
 
-        // BFS 收集整個連通域
         std::vector<int> component;
         std::vector<int> queue;
         queue.reserve(minArea * 2);
@@ -318,17 +303,15 @@ void removeSmallMaskComponents(std::vector<uint8_t>& mask,
             }
         }
 
-        // 面積未達閾值 → 清除（設為不可通行）
         if ((int)component.size() < minArea) {
             for (int idx : component) mask[idx] = 0;
         }
     }
 }
 
-//  intelligentFloodFill
-//  新增參數：
-//    normalizelighting (int) — 保留參數（已移除光影均一化功能，傳 0 即可）
-//    denoiseMinArea    (int) — > 0 = 清除遮罩中面積過小的連通域，0 = 跳過
+// mode: 0 = RGB 容差（色塊圖），1 = HSL（線稿圖）。
+// normalizelighting 為保留參數，目前未使用。
+// denoiseMinArea > 0 時清除遮罩中面積過小的連通域。
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
                            int pathColorTolerance,
@@ -370,7 +353,6 @@ void intelligentFloodFill(int width, int height,
                                      closingKernelSize, wallThicken);
     }
 
-    // 後處理：清除遮罩中面積過小的孤立連通域（破碎小區塊）
     if (denoiseMinArea > 0) {
         removeSmallMaskComponents(mask, width, height, denoiseMinArea);
     }
@@ -404,7 +386,6 @@ int runAStar(int startX, int startY, int endX, int endY) {
         return 1;
     }
 
-    // 資料結構 
     struct Node {
         float f, g;
         int   idx;
@@ -416,7 +397,6 @@ int runAStar(int startX, int startY, int endX, int endY) {
     std::vector<int>   parent(W * H, -1);
     std::vector<bool>  closed(W * H, false);
 
-    // 8 方向定義
     const int   DDX[8]  = {  0,  0, -1,  1, -1, -1,  1,  1 };
     const int   DDY[8]  = { -1,  1,  0,  0, -1,  1, -1,  1 };
     const float COST[8] = { 1.f, 1.f, 1.f, 1.f,
@@ -450,7 +430,7 @@ int runAStar(int startX, int startY, int endX, int endY) {
             int ni = ny * W + nx;
             if (closed[ni] || g_passableMask[ni] == 0) continue;
 
-            // 斜角防穿牆角：確認兩側直線鄰格都可通行
+            // 斜角不得穿越兩側牆角。
             if (d >= 4) {
                 int sideAx = cx + DDX[d], sideAy = cy;
                 int sideBx = cx,          sideBy = cy + DDY[d];
@@ -469,11 +449,10 @@ int runAStar(int startX, int startY, int endX, int endY) {
 
     if (!found) return 0;
 
-    // 回溯並輸出路徑（起點 → 終點順序） 
     std::vector<int32_t> reversed;
     for (int i = endIdx; i != -1; i = parent[i]) {
-        reversed.push_back(i % W);  // x
-        reversed.push_back(i / W);  // y
+        reversed.push_back(i % W);
+        reversed.push_back(i / W);
     }
 
     int pairCount = (int)(reversed.size() / 2);
@@ -486,7 +465,6 @@ int runAStar(int startX, int startY, int endX, int endY) {
     return pairCount;
 }
 
-// JS 存取路徑結果
 int getPathBuffer() {
     return (int)(intptr_t)(g_pathBuffer.data());
 }
@@ -495,7 +473,6 @@ int getPathLength() {
     return (int)(g_pathBuffer.size() / 2);
 }
 
-// JS 存取可通行遮罩（供 JS 側直線化使用）
 int getPassableMaskBuffer()  { return (int)(intptr_t)(g_passableMask.data()); }
 int getPassableMaskSize()    { return (int)g_passableMask.size(); }
 int getPassableMaskWidth()   { return g_maskWidth;  }

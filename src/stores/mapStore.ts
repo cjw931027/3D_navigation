@@ -16,54 +16,18 @@ export interface FloodFillParams {
 
 export type MapMode = 'indoor' | 'outdoor'
 
-// ============================================================
-//  地圖類型：色塊圖 (BFS) vs 線稿圖 (YOLO)
-// ============================================================
-export type MapType = 'color-block' | 'line-art'
-
-/** 偵測閾值：彩色像素佔比超過此值 → 色塊圖 */
-const COLOR_PIXEL_THRESHOLD = 0.05
-
-/**
- * 分析 imageRawData 中彩色像素（有色相、非黑非白）佔全圖的比例。
- *
- * 判定標準（HSV 近似）：
- *   max(R,G,B) - min(R,G,B) > 30  → 有足夠色差（排除灰色）
- *   max(R,G,B) > 30               → 非近黑
- *
- * 效能：stride=4 對每 4 個像素取 1 樣，1200×1200 圖約掃 360K 次，
- * 純整數運算，實測 < 10ms。
- *
- * @returns 0–1 之間的彩色像素比例
- */
-function calcColorPixelRatio(
-  data: Uint8ClampedArray,
-  pixelCount: number
-): number {
-  const CHROMA_MIN = 30  // max-min 差值下限（排除灰階）
-  const VALUE_MIN  = 30  // 亮度下限（排除近黑）
-  const STRIDE     = 4   // 每隔幾個像素取樣一次
-
-  let chromatic = 0
-  let sampled   = 0
-
-  for (let p = 0; p < pixelCount; p += STRIDE) {
-    const i = p * 4
-    const r = data[i]!
-    const g = data[i + 1]!
-    const b = data[i + 2]!
-
-    const maxC = r > g ? (r > b ? r : b) : (g > b ? g : b)
-    const minC = r < g ? (r < b ? r : b) : (g < b ? g : b)
-
-    if (maxC > VALUE_MIN && maxC - minC > CHROMA_MIN) chromatic++
-    sampled++
-  }
-
-  return sampled > 0 ? chromatic / sampled : 0
+export interface Landmark {
+  id: string
+  text: string
+  pixelX: number
+  pixelY: number
+  source: 'ocr' | 'manual'
+  confidence?: number
 }
 
-// ============================================================
+export type PositioningMode = 'manual' | 'inertial' | 'ar'
+
+export type MapType = 'color-block' | 'line-art'
 
 interface ModeRange {
   defaultSensitivity: number
@@ -77,14 +41,14 @@ const MODE_RANGE: Record<MapMode, ModeRange> = {
   indoor: {
     defaultSensitivity: 4,
     pathColorTolerance: [8,  60],
-    closingKernelSize:  [1,  7 ],
+    closingKernelSize:  [3,  9 ],
     wallThicken:        [0,  2 ],
     sampleRadius:       [5,  12],
   },
   outdoor: {
     defaultSensitivity: 4,
     pathColorTolerance: [10, 70],
-    closingKernelSize:  [1,  5 ],
+    closingKernelSize:  [3,  7 ],
     wallThicken:        [0,  2 ],
     sampleRadius:       [4,  12],
   },
@@ -100,33 +64,21 @@ function lerpOdd(a: number, b: number, t: number): number {
   return rounded % 2 === 0 ? Math.max(1, rounded - 1) : rounded
 }
 
+// 線稿圖送 WASM 前先 2x 上採樣，避免窄走廊被 closing/erode 消除。
+const LINE_ART_UPSCALE = 2
+
 function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   const r = MODE_RANGE[mode]
   const t = (sensitivity - 1) / 9
 
-  let closingKernelSize: number
-  if (sensitivity <= 5) {
-    closingKernelSize = 1
-  } else {
-    const t2 = (sensitivity - 5) / 5
-    closingKernelSize = lerpOdd(r.closingKernelSize[0], r.closingKernelSize[1], t2)
-  }
+  const closingKernelSize = lerpOdd(r.closingKernelSize[0], r.closingKernelSize[1], t)
 
   let wallThicken: number
-  if (mode === 'indoor') {
-    if (sensitivity <= 6) {
-      wallThicken = 0
-    } else {
-      const t2 = (sensitivity - 6) / 4
-      wallThicken = lerp(0, 2, t2)
-    }
+  if (sensitivity <= 8) {
+    wallThicken = 0
   } else {
-    if (sensitivity <= 8) {
-      wallThicken = 0
-    } else {
-      const t2 = (sensitivity - 8) / 2
-      wallThicken = lerp(0, 2, t2)
-    }
+    const t2 = (sensitivity - 8) / 2
+    wallThicken = lerp(0, 2, t2)
   }
 
   return {
@@ -137,13 +89,7 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   }
 }
 
-// ============================================================
-//  路徑直線化：Visibility-graph greedy shortcut
-//
-//  從起點開始，每次盡量往最遠可直達的節點跳，
-//  中間用 Bresenham line 逐像素檢查是否都在可通行遮罩內。
-//  結果只保留必要的轉折點，其餘全部省略。
-// ============================================================
+// Visibility-graph greedy shortcut：保留起點、每次跳至最遠可直達節點。
 function straightenPath(
   nodes: Point[],
   mask: Uint8Array,
@@ -152,7 +98,6 @@ function straightenPath(
 ): Point[] {
   if (nodes.length <= 2) return nodes
 
-  // Bresenham 直線可通行檢查
   function linePassable(x0: number, y0: number, x1: number, y1: number): boolean {
     let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0)
     let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1
@@ -173,7 +118,6 @@ function straightenPath(
   let cur = 0
 
   while (cur < nodes.length - 1) {
-    // 從 cur 往後找最遠可直達的節點
     let far = cur + 1
     for (let j = nodes.length - 1; j > cur + 1; j--) {
       if (linePassable(
@@ -214,46 +158,48 @@ export const useMapStore = defineStore('map', () => {
   const wasmModule    = ref<any>(null)
   const isEngineReady = ref<boolean>(false)
 
-  // 遮罩連通域過濾閾值（0 = 關閉）
   const denoiseMinArea = ref<number>(80)
 
-  // FloodFill 後的像素快取，供「重算路徑」時重繪底圖用
+  const upscaleFactor = ref<number>(1)
+
   const floodFillResultData = ref<Uint8ClampedArray | null>(null)
 
-  // ============================================================
-  //  地圖類型自動偵測
-  // ============================================================
-
-  /** 自動偵測到的地圖類型（不受手動覆蓋影響） */
-  const mapTypeAuto = ref<MapType>('color-block')
-
-  /** 目前生效的地圖類型（可被使用者手動覆蓋） */
   const mapType = ref<MapType>('color-block')
 
-  /** 彩色像素佔比（0–1），供 UI 顯示置信度用 */
-  const colorPixelRatio = ref<number>(0)
+  const landmarks = ref<Landmark[]>([])
 
-  /** 使用者是否已手動覆蓋自動偵測結果 */
-  const mapTypeOverridden = ref<boolean>(false)
-
-  /**
-   * 手動設定地圖類型（覆蓋自動偵測）。
-   * 傳入 null 可還原為自動偵測結果。
-   */
-  function setMapType(type: MapType | null) {
-    if (type === null) {
-      mapType.value          = mapTypeAuto.value
-      mapTypeOverridden.value = false
-    } else {
-      mapType.value          = type
-      mapTypeOverridden.value = type !== mapTypeAuto.value
-    }
+  function setLandmarks(list: Landmark[]) {
+    landmarks.value = list
   }
 
-  // ============================================================
+  function addLandmark(l: Landmark) {
+    landmarks.value = [...landmarks.value, l]
+  }
+
+  function removeLandmark(id: string) {
+    landmarks.value = landmarks.value.filter(l => l.id !== id)
+  }
+
+  function updateLandmark(id: string, patch: Partial<Landmark>) {
+    landmarks.value = landmarks.value.map(l => (l.id === id ? { ...l, ...patch } : l))
+  }
+
+  // Phase 3 定位狀態，目前尚未啟用。
+  const userPosition   = ref<Point | null>(null)
+  const userHeading    = ref<number | null>(null)
+  const positioningMode = ref<PositioningMode>('manual')
+
+  function setMapType(type: MapType) {
+    mapType.value       = type
+    upscaleFactor.value = type === 'line-art' ? LINE_ART_UPSCALE : 1
+    applyComputed()
+  }
 
   function applyComputed() {
-    floodFillParams.value = computeParams(mapMode.value, sensitivity.value)
+    const p = computeParams(mapMode.value, sensitivity.value)
+    // 線稿圖走廊本身就窄，erode 會切斷；強制關閉牆壁加厚。
+    if (mapType.value === 'line-art') p.wallThicken = 0
+    floodFillParams.value = p
   }
 
   function setMapMode(mode: MapMode) {
@@ -294,15 +240,13 @@ export const useMapStore = defineStore('map', () => {
     endPoint.value            = null
     pathNodes.value           = []
     floodFillResultData.value = null
+    landmarks.value           = []
+    userPosition.value        = null
+    userHeading.value         = null
 
-    // ── 自動偵測地圖類型 ──────────────────────────────────
-    const ratio = calcColorPixelRatio(data, width * height)
-    colorPixelRatio.value   = ratio
-    const detected: MapType = ratio > COLOR_PIXEL_THRESHOLD ? 'color-block' : 'line-art'
-    mapTypeAuto.value       = detected
-    mapType.value           = detected       // 重置為自動偵測值
-    mapTypeOverridden.value = false
-    // ─────────────────────────────────────────────────────
+    mapType.value       = 'color-block'
+    upscaleFactor.value = 1
+    applyComputed()
   }
 
   function setSeedPoint(seed: Point | null) {
@@ -352,10 +296,6 @@ export const useMapStore = defineStore('map', () => {
     }
   }
 
-  // ============================================================
-  //  A* 最短路徑
-  // ============================================================
-
   const pathNodes = ref<Point[]>([])
 
   function runAStar(): number {
@@ -367,9 +307,10 @@ export const useMapStore = defineStore('map', () => {
     if (!start || !end) return 0
 
     try {
+      const up = upscaleFactor.value
       const nodeCount: number = wasm.runAStar(
-        Math.round(start.x), Math.round(start.y),
-        Math.round(end.x),   Math.round(end.y)
+        Math.round(start.x * up), Math.round(start.y * up),
+        Math.round(end.x   * up), Math.round(end.y   * up)
       )
 
       if (nodeCount === 0) {
@@ -390,15 +331,17 @@ export const useMapStore = defineStore('map', () => {
         raw.push({ x, y })
       }
 
-      // 用 g_passableMask 對路徑做直線化
-      // getPassableMask() 回傳遮罩的 byte offset 與長度
+      // straighten 在放大座標系進行，最後除回原尺寸。
       const maskPtr    = wasm.getPassableMaskBuffer() as number
       const maskLen    = wasm.getPassableMaskSize()   as number
       const maskW      = wasm.getPassableMaskWidth()  as number
       const maskH      = wasm.getPassableMaskHeight() as number
       const maskBytes  = heapBytes.subarray(maskPtr, maskPtr + maskLen)
 
-      pathNodes.value = straightenPath(raw, maskBytes, maskW, maskH)
+      const straightened = straightenPath(raw, maskBytes, maskW, maskH)
+      pathNodes.value = up === 1
+        ? straightened
+        : straightened.map(p => ({ x: p.x / up, y: p.y / up }))
       return pathNodes.value.length
 
     } catch (err) {
@@ -422,7 +365,9 @@ export const useMapStore = defineStore('map', () => {
     pathNodes, runAStar, clearPath,
     floodFillResultData,
     denoiseMinArea,
-    // 地圖類型
-    mapType, mapTypeAuto, colorPixelRatio, mapTypeOverridden, setMapType,
+    upscaleFactor,
+    mapType, setMapType,
+    landmarks, setLandmarks, addLandmark, removeLandmark, updateLandmark,
+    userPosition, userHeading, positioningMode,
   }
 })
