@@ -210,6 +210,61 @@ bool findNearestPassable(int& sx, int& sy, int width, int height,
     return false;
 }
 
+// 只填「被 1 完全包圍、面積 <= maxHoleArea」的 0 區塊；不碰連到邊界的區域，避免橋接細牆。
+void fillSmallHoles(std::vector<uint8_t>& mask, int width, int height, int maxHoleArea) {
+    if (maxHoleArea <= 0) return;
+    int total = width * height;
+    std::vector<bool> visited(total, false);
+
+    const int dx4[] = {0, 0, -1, 1};
+    const int dy4[] = {-1, 1, 0, 0};
+
+    std::vector<int> queue;
+    queue.reserve(total / 4);
+    for (int x = 0; x < width; x++) {
+        int top = x, bot = (height - 1) * width + x;
+        if (mask[top] == 0 && !visited[top]) { visited[top] = true; queue.push_back(top); }
+        if (mask[bot] == 0 && !visited[bot]) { visited[bot] = true; queue.push_back(bot); }
+    }
+    for (int y = 0; y < height; y++) {
+        int l = y * width, r = y * width + (width - 1);
+        if (mask[l] == 0 && !visited[l]) { visited[l] = true; queue.push_back(l); }
+        if (mask[r] == 0 && !visited[r]) { visited[r] = true; queue.push_back(r); }
+    }
+    for (int head = 0; head < (int)queue.size(); head++) {
+        int cur = queue[head];
+        int cx = cur % width, cy = cur / width;
+        for (int d = 0; d < 4; d++) {
+            int nx = cx + dx4[d], ny = cy + dy4[d];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int ni = ny * width + nx;
+            if (!visited[ni] && mask[ni] == 0) { visited[ni] = true; queue.push_back(ni); }
+        }
+    }
+
+    for (int start = 0; start < total; start++) {
+        if (visited[start] || mask[start] != 0) continue;
+        std::vector<int> comp;
+        std::vector<int> q;
+        q.push_back(start);
+        visited[start] = true;
+        for (int head = 0; head < (int)q.size(); head++) {
+            int cur = q[head];
+            comp.push_back(cur);
+            int cx = cur % width, cy = cur / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx4[d], ny = cy + dy4[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && mask[ni] == 0) { visited[ni] = true; q.push_back(ni); }
+            }
+        }
+        if ((int)comp.size() <= maxHoleArea) {
+            for (int idx : comp) mask[idx] = 1;
+        }
+    }
+}
+
 std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
                                            const std::vector<RGB>& pathColors,
                                            int pathTolSq,
@@ -228,8 +283,7 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     }
 
     if (closingKernelSize > 1) {
-        dilate(mask, width, height, closingKernelSize);
-        erode(mask, width, height, closingKernelSize);
+        fillSmallHoles(mask, width, height, closingKernelSize * closingKernelSize * 4);
     }
     if (wallThicken > 0) {
         erode(mask, width, height, wallThicken * 2 + 1);
@@ -259,8 +313,7 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
     }
 
     if (closingKernelSize > 1) {
-        dilate(mask, width, height, closingKernelSize);
-        erode(mask, width, height, closingKernelSize);
+        fillSmallHoles(mask, width, height, closingKernelSize * closingKernelSize * 4);
     }
     if (wallThicken > 0) {
         erode(mask, width, height, wallThicken * 2 + 1);
