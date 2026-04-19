@@ -164,6 +164,17 @@ export const useMapStore = defineStore('map', () => {
 
   const floodFillResultData = ref<Uint8ClampedArray | null>(null)
 
+  // 0/1 可通行遮罩，尺寸為上採樣後的 maskWidth × maskHeight。
+  const passableMask = ref<Uint8Array | null>(null)
+  const maskWidth    = ref<number>(0)
+  const maskHeight   = ref<number>(0)
+
+  function setPassableMask(mask: Uint8Array, w: number, h: number) {
+    passableMask.value = mask
+    maskWidth.value    = w
+    maskHeight.value   = h
+  }
+
   const mapType = ref<MapType>('color-block')
 
   const landmarks = ref<Landmark[]>([])
@@ -240,6 +251,9 @@ export const useMapStore = defineStore('map', () => {
     endPoint.value            = null
     pathNodes.value           = []
     floodFillResultData.value = null
+    passableMask.value        = null
+    maskWidth.value           = 0
+    maskHeight.value          = 0
     landmarks.value           = []
     userPosition.value        = null
     userHeading.value         = null
@@ -364,6 +378,7 @@ export const useMapStore = defineStore('map', () => {
     wasmModule, isEngineReady, initEngine,
     pathNodes, runAStar, clearPath,
     floodFillResultData,
+    passableMask, maskWidth, maskHeight, setPassableMask,
     denoiseMinArea,
     upscaleFactor,
     mapType, setMapType,
