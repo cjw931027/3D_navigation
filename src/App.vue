@@ -15,6 +15,7 @@ onMounted(() => {
     <nav class="navbar">
       <RouterLink to="/" class="nav-btn">🏠 首頁</RouterLink>
       <RouterLink to="/upload" class="nav-btn">📤 上傳地圖</RouterLink>
+      <RouterLink to="/scene" class="nav-btn">🧊 3D 場景</RouterLink>
     </nav>
 
     <div class="content">
