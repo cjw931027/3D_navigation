@@ -13,6 +13,7 @@ let frameId = 0
 let resizeObserver: ResizeObserver | null = null
 
 const mapGroup = new THREE.Group()
+const pathGroup = new THREE.Group()
 
 const hasMask = computed(
   () => !!mapStore.passableMask && mapStore.maskWidth > 0 && mapStore.maskHeight > 0,
@@ -154,6 +155,59 @@ function buildGeometry() {
   }
 }
 
+function buildPath() {
+  disposeGroup(pathGroup)
+  if (!mapStore.passableMask) return
+  if (!mapStore.pathNodes || mapStore.pathNodes.length < 2) return
+
+  const width  = mapStore.maskWidth
+  const height = mapStore.maskHeight
+  if (width <= 0 || height <= 0) return
+
+  const cellSize = MAP_EXTENT / Math.max(width, height)
+  const halfW = (width  * cellSize) / 2
+  const halfH = (height * cellSize) / 2
+  const up = mapStore.upscaleFactor || 1
+  // 路徑節點為原始影像座標，需換算回遮罩座標系。
+  const yLift = cellSize * 0.3
+
+  const points = mapStore.pathNodes.map((p) => {
+    const mx = p.x * up
+    const my = p.y * up
+    return new THREE.Vector3(
+      (mx + 0.5) * cellSize - halfW,
+      yLift,
+      (my + 0.5) * cellSize - halfH,
+    )
+  })
+
+  const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.1)
+  const tubeSegments = Math.max(32, points.length * 8)
+  const radius = cellSize * 0.45
+  const tubeGeo = new THREE.TubeGeometry(curve, tubeSegments, radius, 8, false)
+  const tubeMat = new THREE.MeshStandardMaterial({
+    color: 0x00ffaa,
+    emissive: 0x00ffaa,
+    emissiveIntensity: 0.9,
+    roughness: 0.3,
+    metalness: 0.2,
+  })
+  pathGroup.add(new THREE.Mesh(tubeGeo, tubeMat))
+
+  const markerGeo = new THREE.SphereGeometry(cellSize * 0.9, 20, 20)
+  const startMat = new THREE.MeshStandardMaterial({
+    color: 0x00ff66, emissive: 0x00ff66, emissiveIntensity: 0.8,
+  })
+  const endMat = new THREE.MeshStandardMaterial({
+    color: 0xff4466, emissive: 0xff4466, emissiveIntensity: 0.8,
+  })
+  const startMarker = new THREE.Mesh(markerGeo, startMat)
+  startMarker.position.copy(points[0]!).setY(cellSize * 0.9)
+  const endMarker = new THREE.Mesh(markerGeo.clone(), endMat)
+  endMarker.position.copy(points[points.length - 1]!).setY(cellSize * 0.9)
+  pathGroup.add(startMarker, endMarker)
+}
+
 function resize() {
   if (!container.value || !renderer || !camera) return
   const { clientWidth: w, clientHeight: h } = container.value
@@ -165,6 +219,7 @@ function resize() {
 function animate() {
   frameId = requestAnimationFrame(animate)
   mapGroup.rotation.y += 0.0015
+  pathGroup.rotation.y = mapGroup.rotation.y
   renderer!.render(scene!, camera!)
 }
 
@@ -192,7 +247,9 @@ onMounted(() => {
   scene.add(grid)
 
   scene.add(mapGroup)
+  scene.add(pathGroup)
   buildGeometry()
+  buildPath()
 
   resize()
   resizeObserver = new ResizeObserver(resize)
@@ -203,13 +260,23 @@ onMounted(() => {
 
 watch(
   () => [mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight],
-  () => buildGeometry(),
+  () => {
+    buildGeometry()
+    buildPath()
+  },
+)
+
+watch(
+  () => mapStore.pathNodes,
+  () => buildPath(),
+  { deep: true },
 )
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(frameId)
   resizeObserver?.disconnect()
   disposeGroup(mapGroup)
+  disposeGroup(pathGroup)
   renderer?.dispose()
   if (renderer?.domElement.parentElement) {
     renderer.domElement.parentElement.removeChild(renderer.domElement)
