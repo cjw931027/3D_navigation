@@ -691,6 +691,69 @@ canvas {
 }
 .btn-primary:hover { background: #0d47a1; }
 
+.next-section {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.landmark-section {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0;
+}
+
+.btn-secondary {
+  padding: 12px 24px;
+  font-size: 0.95em;
+  font-weight: 600;
+  background: white;
+  color: #1565c0;
+  border: 1px solid #1565c0;
+  border-radius: 7px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.btn-secondary:hover { background: #e3f2fd; }
+
+.lm-modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.lm-modal-box {
+  position: relative;
+  background: white;
+  border-radius: 10px;
+  padding: 24px 20px 20px;
+  max-width: 1000px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+}
+
+.lm-modal-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: #eee;
+  border-radius: 50%;
+  cursor: pointer;
+  font-weight: 700;
+  color: #555;
+}
+.lm-modal-close:hover { background: #ddd; color: #c62828; }
+
 /* 地圖類型列 */
 .map-type-row {
   display: flex;
