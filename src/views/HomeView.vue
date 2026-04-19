@@ -197,6 +197,15 @@ const runFloodFill = () => {
     }
     mapStore.floodFillResultData = displayBuffer
 
+    const maskPtr  = mapStore.wasmModule.getPassableMaskBuffer() as number
+    const maskLen  = mapStore.wasmModule.getPassableMaskSize()   as number
+    const maskW    = mapStore.wasmModule.getPassableMaskWidth()  as number
+    const maskH    = mapStore.wasmModule.getPassableMaskHeight() as number
+    const maskCopy = new Uint8Array(
+      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, maskPtr, maskLen
+    ).slice()
+    mapStore.setPassableMask(maskCopy, maskW, maskH)
+
     mapStore.wasmModule.freeMemory()
     processTime.value = Math.round(performance.now() - t0)
 
