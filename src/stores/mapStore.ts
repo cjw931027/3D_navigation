@@ -135,6 +135,141 @@ function straightenPath(
   return result
 }
 
+// 將斜向節點重寫為純軸向 L 形；兩個 L 皆被擋時遞迴二分尋找可通行的中繼點。
+function axisAlignPath(
+  nodes: Point[],
+  mask: Uint8Array,
+  width: number,
+  height: number
+): Point[] {
+  if (nodes.length <= 1) return nodes
+
+  function hOk(x0: number, x1: number, y: number): boolean {
+    if (y < 0 || y >= height) return false
+    const lo = Math.min(x0, x1), hi = Math.max(x0, x1)
+    for (let x = lo; x <= hi; x++) {
+      if (x < 0 || x >= width) return false
+      if (mask[y * width + x] === 0) return false
+    }
+    return true
+  }
+  function vOk(x: number, y0: number, y1: number): boolean {
+    if (x < 0 || x >= width) return false
+    const lo = Math.min(y0, y1), hi = Math.max(y0, y1)
+    for (let y = lo; y <= hi; y++) {
+      if (y < 0 || y >= height) return false
+      if (mask[y * width + x] === 0) return false
+    }
+    return true
+  }
+
+  function lShape(from: Point, to: Point, depth: number): Point[] {
+    if (from.x === to.x && from.y === to.y) return []
+    if (from.x === to.x || from.y === to.y) return [to]
+    const okH = hOk(from.x, to.x, from.y) && vOk(to.x, from.y, to.y)
+    const okV = vOk(from.x, from.y, to.y) && hOk(from.x, to.x, to.y)
+    const preferH = Math.abs(to.x - from.x) >= Math.abs(to.y - from.y)
+    if (okH && (preferH || !okV)) return [{ x: to.x,   y: from.y }, to]
+    if (okV)                      return [{ x: from.x, y: to.y   }, to]
+    if (okH)                      return [{ x: to.x,   y: from.y }, to]
+    if (depth >= 5) return [to]
+    const mx = Math.round((from.x + to.x) / 2)
+    const my = Math.round((from.y + to.y) / 2)
+    if (mx < 0 || mx >= width || my < 0 || my >= height) return [to]
+    if (mask[my * width + mx] === 0) return [to]
+    const mid = { x: mx, y: my }
+    return [...lShape(from, mid, depth + 1), ...lShape(mid, to, depth + 1)]
+  }
+
+  const out: Point[] = [{ x: Math.round(nodes[0]!.x), y: Math.round(nodes[0]!.y) }]
+  for (let i = 1; i < nodes.length; i++) {
+    const from = out[out.length - 1]!
+    const to   = { x: Math.round(nodes[i]!.x), y: Math.round(nodes[i]!.y) }
+    for (const p of lShape(from, to, 0)) out.push(p)
+  }
+  return out
+}
+
+// 將「內部」軸向段垂直於自身方向擴張到牆面極限，取中央作為該段新座標，轉角自然落在走廊中線。
+function centerlinePath(
+  wps: Point[],
+  mask: Uint8Array,
+  width: number,
+  height: number
+): Point[] {
+  if (wps.length < 4) return wps
+
+  function rowPassable(y: number, xMin: number, xMax: number): boolean {
+    if (y < 0 || y >= height) return false
+    for (let x = xMin; x <= xMax; x++) {
+      if (x < 0 || x >= width) return false
+      if (mask[y * width + x] === 0) return false
+    }
+    return true
+  }
+  function colPassable(x: number, yMin: number, yMax: number): boolean {
+    if (x < 0 || x >= width) return false
+    for (let y = yMin; y <= yMax; y++) {
+      if (y < 0 || y >= height) return false
+      if (mask[y * width + x] === 0) return false
+    }
+    return true
+  }
+
+  interface Seg {
+    isH: boolean
+    xMin: number; xMax: number
+    yMin: number; yMax: number
+    perp: number
+  }
+  const segs: Seg[] = []
+  for (let i = 0; i < wps.length - 1; i++) {
+    const a = wps[i]!, b = wps[i + 1]!
+    if (a.x === b.x && a.y === b.y) continue
+    const isH = a.y === b.y
+    segs.push({
+      isH,
+      xMin: Math.min(a.x, b.x), xMax: Math.max(a.x, b.x),
+      yMin: Math.min(a.y, b.y), yMax: Math.max(a.y, b.y),
+      perp: isH ? a.y : a.x,
+    })
+  }
+  if (segs.length < 2) return wps
+
+  for (let i = 1; i < segs.length - 1; i++) {
+    const s = segs[i]!
+    if (s.isH) {
+      let yUp = s.perp, yDn = s.perp
+      while (rowPassable(yUp - 1, s.xMin, s.xMax)) yUp--
+      while (rowPassable(yDn + 1, s.xMin, s.xMax)) yDn++
+      s.perp = Math.round((yUp + yDn) / 2)
+    } else {
+      let xL = s.perp, xR = s.perp
+      while (colPassable(xL - 1, s.yMin, s.yMax)) xL--
+      while (colPassable(xR + 1, s.yMin, s.yMax)) xR++
+      s.perp = Math.round((xL + xR) / 2)
+    }
+  }
+
+  const result: Point[] = [{ x: wps[0]!.x, y: wps[0]!.y }]
+  for (let i = 1; i < wps.length - 1; i++) {
+    const before = segs[i - 1]
+    const after  = segs[i]
+    let nx = wps[i]!.x, ny = wps[i]!.y
+    if (before) {
+      if (before.isH) ny = before.perp
+      else            nx = before.perp
+    }
+    if (after) {
+      if (after.isH)  ny = after.perp
+      else            nx = after.perp
+    }
+    result.push({ x: nx, y: ny })
+  }
+  result.push({ x: wps[wps.length - 1]!.x, y: wps[wps.length - 1]!.y })
+  return result
+}
+
 export const useMapStore = defineStore('map', () => {
 
   const imageRawData = ref<Uint8ClampedArray | null>(null)
@@ -203,6 +338,7 @@ export const useMapStore = defineStore('map', () => {
   function setMapType(type: MapType) {
     mapType.value       = type
     upscaleFactor.value = type === 'line-art' ? LINE_ART_UPSCALE : 1
+    clearDerivedResults()
     applyComputed()
   }
 
@@ -216,7 +352,17 @@ export const useMapStore = defineStore('map', () => {
   function setMapMode(mode: MapMode) {
     mapMode.value     = mode
     sensitivity.value = MODE_RANGE[mode].defaultSensitivity
+    clearDerivedResults()
     applyComputed()
+  }
+
+  // 改動會使既有 flood fill 結果與路徑座標失效時，統一清理下游狀態。
+  function clearDerivedResults() {
+    pathNodes.value           = []
+    passableMask.value        = null
+    maskWidth.value           = 0
+    maskHeight.value          = 0
+    floodFillResultData.value = null
   }
 
   function setSensitivity(val: number) {
@@ -319,6 +465,10 @@ export const useMapStore = defineStore('map', () => {
 
     if (!wasm || !isEngineReady.value) return 0
     if (!start || !end) return 0
+    if (!passableMask.value || maskWidth.value === 0 || maskHeight.value === 0) {
+      console.warn('runAStar: passableMask 尚未建立，請先執行路徑識別')
+      return 0
+    }
 
     try {
       const up = upscaleFactor.value
@@ -353,9 +503,11 @@ export const useMapStore = defineStore('map', () => {
       const maskBytes  = heapBytes.subarray(maskPtr, maskPtr + maskLen)
 
       const straightened = straightenPath(raw, maskBytes, maskW, maskH)
+      const aligned      = axisAlignPath(straightened, maskBytes, maskW, maskH)
+      const centered     = centerlinePath(aligned, maskBytes, maskW, maskH)
       pathNodes.value = up === 1
-        ? straightened
-        : straightened.map(p => ({ x: p.x / up, y: p.y / up }))
+        ? centered
+        : centered.map(p => ({ x: p.x / up, y: p.y / up }))
       return pathNodes.value.length
 
     } catch (err) {
