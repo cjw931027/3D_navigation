@@ -32,6 +32,7 @@ void freeMemory() {
     }
 }
 
+// 計算兩個RGB顏色的差異程度，歐幾里得距離
 inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
                         uint8_t r2, uint8_t g2, uint8_t b2) {
     int dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
@@ -42,13 +43,15 @@ struct RGB { uint8_t r, g, b; };
 
 struct HSL { float h, s, l; };
 
+
+// RGB轉換成HSL
 HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
     float mx = std::max({r, g, b}), mn = std::min({r, g, b});
-    float l = (mx + mn) * 0.5f;
-    float d = mx - mn;
-    float h = 0, s = 0;
-    if (d > 1e-6f) {
+    float l = (mx + mn) * 0.5f; //亮度，rgb的最大最小值相加除2
+    float d = mx - mn; 
+    float h = 0, s = 0; // 預設是灰階
+    if (d > 1e-6f) { // 有顏色，代公式計算飽和度S和色相H
         s = (l > 0.5f) ? d / (2.0f - mx - mn) : d / (mx + mn);
         if (mx == r)      h = (g - b) / d + (g < b ? 6.0f : 0.0f);
         else if (mx == g) h = (b - r) / d + 2.0f;
@@ -58,6 +61,7 @@ HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     return { h, s, l };
 }
 
+// 計算兩個HSL顏色的差異度
 float hslDist(HSL a, HSL b) {
     float dL = a.l - b.l;
     float dS = a.s - b.s;
@@ -71,6 +75,7 @@ float hslDist(HSL a, HSL b) {
     return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
 }
 
+// 依照點選的種子點搜索周圍radius內最常出現的顏色，當作真正的種子點，以防點錯
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -123,11 +128,14 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
     return result;
 }
 
+// 將最後兩個變數固定，quantShift是把相近的顏色歸類成同一類，設定為3代表使用位元運算(較快)，會同時同除8再乘8
+// topK是指選擇最前面幾個點當作種子點，設定為1就是第一多的當種子點
 RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
     auto colors = sampleDominantColors(cx, cy, width, height, radius, 3, 1);
     return colors[0];
 }
 
+// 斷點填補功能，將靠近牆壁的點膨脹kSize倍
 void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;
@@ -141,6 +149,8 @@ void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     mask = result;
 }
 
+
+// 將斷點填補的點填回去，以及牆壁加厚
 void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;

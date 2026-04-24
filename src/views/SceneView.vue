@@ -42,7 +42,10 @@ let sceneWallHeight = 2
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
 let collisionH = 0
+// px→碰撞格（原始 passableMask，= sceneUp）；供 isPassableAtPixel / snap 使用。
 let pxToColl = 1
+// px→顯示格（下採樣後的 data 網格）；供 pixelToWorld 把像素座標映射回 3D 世界 XZ。
+let pxToDisplay = 1
 
 function disposeGroup(group: THREE.Group) {
   group.traverse((obj) => {
@@ -123,6 +126,33 @@ function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
 }
 
 type Pt = { x: number; y: number }
+
+// 將 passable 區以 8-連通膨脹 N 格；視覺用的遮罩比碰撞略大，避免 DP / blur 把簡化牆面拉進
+// 原始通行區，造成玩家走到像素邊界時穿進視覺牆體。
+function dilatePassable(data: Uint8Array, w: number, h: number, iters: number): Uint8Array {
+  let cur = new Uint8Array(data)
+  for (let it = 0; it < iters; it++) {
+    const next = new Uint8Array(cur)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (cur[y * w + x] === 1) continue
+        let hit = false
+        for (let dy = -1; dy <= 1 && !hit; dy++) {
+          const yy = y + dy
+          if (yy < 0 || yy >= h) continue
+          for (let dx = -1; dx <= 1 && !hit; dx++) {
+            const xx = x + dx
+            if (xx < 0 || xx >= w) continue
+            if (cur[yy * w + xx] === 1) hit = true
+          }
+        }
+        if (hit) next[y * w + x] = 1
+      }
+    }
+    cur = next
+  }
+  return cur
+}
 
 // 外圍補 1 格 0 再做 N 次 3x3 box blur；把二值遮罩轉為 0..1 連續場，讓 iso-contour 可以吃到斜線特徵。
 // passes 加大會更平滑但會吃掉 1 格寬的薄牆；1 pass 對 2+ 格的牆保留良好。
@@ -354,59 +384,125 @@ function pointInPolygon(p: Pt, poly: Pt[]): boolean {
   return inside
 }
 
-// 在 store 上採樣後的 passableMask 上做 Bresenham 可視度檢查，用於把 axisAlignPath
-// 打進 pathNodes 的階梯形節點重新簡化回最長直線段。
-function linePassableOnMask(x0: number, y0: number, x1: number, y1: number): boolean {
+// DP 簡化 pathNodes：若中間節點到 chord 的 perpDist 在 eps 之內、且 chord 在原始
+// passableMask 上 Bresenham 可通行，就丟棄。用於清除 store 端 axisAlignPath 產生的
+// 小範圍軸向抖動；有真實轉彎（perpDist > eps）時會保留，不會把路徑拉去貼牆。
+function dpSimplifyPath(
+  nodes: Array<{ x: number; y: number }>, epsPx: number,
+): Array<{ x: number; y: number }> {
+  const n = nodes.length
+  if (n <= 2) return nodes.slice()
   const mask = mapStore.passableMask
-  if (!mask) return false
-  const w = mapStore.maskWidth
-  const h = mapStore.maskHeight
+  if (!mask) return nodes.slice()
+  const W = mapStore.maskWidth
+  const H = mapStore.maskHeight
   const up = mapStore.upscaleFactor || 1
-  let cx = Math.round(x0 * up), cy = Math.round(y0 * up)
-  const tx = Math.round(x1 * up), ty = Math.round(y1 * up)
-  const dx = Math.abs(tx - cx), dy = Math.abs(ty - cy)
-  const sx = cx < tx ? 1 : -1, sy = cy < ty ? 1 : -1
-  let err = dx - dy
-  while (true) {
-    if (cx < 0 || cx >= w || cy < 0 || cy >= h) return false
-    if (mask[cy * w + cx] === 0) return false
-    if (cx === tx && cy === ty) break
-    const e2 = err * 2
-    if (e2 > -dy) { err -= dy; cx += sx }
-    if (e2 <  dx) { err += dx; cy += sy }
-  }
-  return true
-}
-
-function straightenPathNodes(nodes: Array<{ x: number; y: number }>): Array<{ x: number; y: number }> {
-  if (nodes.length <= 2) return nodes.slice()
-  const out: Array<{ x: number; y: number }> = [nodes[0]!]
-  let cur = 0
-  while (cur < nodes.length - 1) {
-    let far = cur + 1
-    for (let j = nodes.length - 1; j > cur + 1; j--) {
-      if (linePassableOnMask(nodes[cur]!.x, nodes[cur]!.y, nodes[j]!.x, nodes[j]!.y)) {
-        far = j
-        break
-      }
+  const linePass = (ax: number, ay: number, bx: number, by: number): boolean => {
+    let cx = Math.round(ax * up), cy = Math.round(ay * up)
+    const tx = Math.round(bx * up), ty = Math.round(by * up)
+    const dx = Math.abs(tx - cx), dy = Math.abs(ty - cy)
+    const sx = cx < tx ? 1 : -1, sy = cy < ty ? 1 : -1
+    let err = dx - dy
+    while (true) {
+      if (cx < 0 || cx >= W || cy < 0 || cy >= H) return false
+      if (mask[cy * W + cx] === 0) return false
+      if (cx === tx && cy === ty) break
+      const e2 = err * 2
+      if (e2 > -dy) { err -= dy; cx += sx }
+      if (e2 <  dx) { err += dx; cy += sy }
     }
-    out.push(nodes[far]!)
-    cur = far
+    return true
   }
+  const eps2 = epsPx * epsPx
+  const keep = new Uint8Array(n)
+  keep[0] = 1
+  keep[n - 1] = 1
+  const stack: Array<[number, number]> = [[0, n - 1]]
+  while (stack.length > 0) {
+    const [lo, hi] = stack.pop()!
+    if (hi - lo < 2) continue
+    const a = nodes[lo]!, b = nodes[hi]!
+    const dx = b.x - a.x, dy = b.y - a.y
+    const L2 = dx * dx + dy * dy
+    let maxD = 0, idx = -1
+    for (let i = lo + 1; i < hi; i++) {
+      const p = nodes[i]!
+      let d
+      if (L2 < 1e-9) {
+        const ex = p.x - a.x, ey = p.y - a.y
+        d = ex * ex + ey * ey
+      } else {
+        const cross = dx * (p.y - a.y) - dy * (p.x - a.x)
+        d = cross * cross / L2
+      }
+      if (d > maxD) { maxD = d; idx = i }
+    }
+    const canSkip = maxD <= eps2 && linePass(a.x, a.y, b.x, b.y)
+    if (!canSkip && idx !== -1) {
+      keep[idx] = 1
+      stack.push([lo, idx], [idx, hi])
+    }
+  }
+  const out: Array<{ x: number; y: number }> = []
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(nodes[i]!)
   return out
 }
 
-function pixelToWorld(px: number, py: number): { x: number; z: number } {
-  const cx = px * pxToColl
-  const cy = py * pxToColl
-  return {
-    x: (cx + 0.5) * sceneCellSize - sceneHalfW,
-    z: (cy + 0.5) * sceneCellSize - sceneHalfH,
+// 掃描線光柵化：把多邊形以 even-odd fill 寫入 mask。座標經 scale 從 display grid 轉到 mask grid。
+// 以 pixel center (cx + 0.5, cy + 0.5) 取樣判斷是否在多邊形內部。
+function rasterizePolygon(
+  poly: Pt[], mask: Uint8Array, w: number, h: number,
+  scaleX: number, scaleY: number, value: 0 | 1,
+) {
+  const n = poly.length
+  if (n < 3) return
+  const xs = new Float32Array(n)
+  const ys = new Float32Array(n)
+  let yMin = Infinity, yMax = -Infinity
+  for (let i = 0; i < n; i++) {
+    xs[i] = poly[i]!.x * scaleX
+    ys[i] = poly[i]!.y * scaleY
+    if (ys[i]! < yMin) yMin = ys[i]!
+    if (ys[i]! > yMax) yMax = ys[i]!
+  }
+  const y0 = Math.max(0, Math.floor(yMin - 0.5))
+  const y1 = Math.min(h - 1, Math.ceil(yMax - 0.5))
+  const crosses: number[] = []
+  for (let y = y0; y <= y1; y++) {
+    const ysa = y + 0.5
+    crosses.length = 0
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n
+      const ay = ys[i]!, by = ys[j]!
+      if ((ay <= ysa && by > ysa) || (by <= ysa && ay > ysa)) {
+        const t = (ysa - ay) / (by - ay)
+        crosses.push(xs[i]! + t * (xs[j]! - xs[i]!))
+      }
+    }
+    crosses.sort((a, b) => a - b)
+    for (let k = 0; k + 1 < crosses.length; k += 2) {
+      const xL = Math.max(0, Math.ceil(crosses[k]! - 0.5))
+      const xR = Math.min(w - 1, Math.floor(crosses[k + 1]! - 0.5))
+      const rowOff = y * w
+      for (let x = xL; x <= xR; x++) mask[rowOff + x] = value
+    }
   }
 }
 
-// 與牆體相鄰的貼牆緩衝；保留比 camera.near 大的距離避免近裁面切穿牆面。
-const COLLISION_MARGIN = 0.18
+function pixelToWorld(px: number, py: number): { x: number; z: number } {
+  // isPassableAtPixel 用 floor(px × sceneUp) 直接映射 mask cell，隱含 px 是連續的 mask 座標
+  // ÷ sceneUp：px=0 對應 mask 座標 0（最左 cell 左邊緣），不是格中央。渲染必須採同一個
+  // 公式、不加任何 +0.5 偏移，否則玩家 render 位置會比 collision 判定系統性地推偏半格，
+  // 在牆邊就會出現「畫面穿牆但還沒撞到／已撞到卻看起來還沒到牆」。
+  return {
+    x: px * pxToDisplay * sceneCellSize - sceneHalfW,
+    z: py * pxToDisplay * sceneCellSize - sceneHalfH,
+  }
+}
+
+// 與牆體相鄰的貼牆緩衝；需大於 camera.near 折算回 cell 的比例，避免近裁面切穿牆面，
+// 同時要夠大以防玩家沿牆滑行時從薄牆之間的對角縫隙鑽過去。
+const COLLISION_MARGIN = 0.3
 function isPassableAtPixel(px: number, py: number): boolean {
   if (!collisionMask) return false
   const cu = px * pxToColl
@@ -449,10 +545,10 @@ function buildGeometry() {
   sceneWallHeight = wallHeight
   sceneEyeHeight  = wallHeight * 0.75
 
-  collisionMask = data
-  collisionW    = width
-  collisionH    = height
-  pxToColl      = (sceneUp * width) / mapStore.maskWidth
+  // collisionMask 在下方 outers / holes 分類後由視覺多邊形光柵化產生，
+  // 讓碰撞與視覺完全一致；這裡只先設與之對應的座標比例。
+  pxToColl    = sceneUp
+  pxToDisplay = (sceneUp * width) / mapStore.maskWidth
 
   // Grid-corner 座標轉世界 XZ。
   const toWX = (gx: number) => gx * dispCell - halfW
@@ -462,7 +558,10 @@ function buildGeometry() {
   // （MS 量化誤差、1 像素缺口等）會被吞掉，避免一段直牆被切成多個微角度不同的小段、
   // 讓 Gouraud 著色呈現肉眼可見的亮度凹凸。
   const DP_EPS = 1.0
-  const rawContours = traceContours(data, width, height)
+  // 視覺遮罩先膨脹 1 格：補償 blur + DP 往內側吃進原通行區的量，
+  // 使簡化後的牆面一定覆蓋原始 passable 區邊界；碰撞仍使用未膨脹的 data。
+  const visualMask = dilatePassable(data, width, height, 1)
+  const rawContours = traceContours(visualMask, width, height)
   const simplified = rawContours
     .map((c) => dpClosed(c, DP_EPS))
     .filter((c) => c.length >= 3)
@@ -474,6 +573,19 @@ function buildGeometry() {
     if (signedArea(c) > 0) outers.push(c)
     else                   holes.push(c)
   }
+
+  // 將視覺多邊形光柵化回 passableMask 解析度作為碰撞 mask：
+  // 肉眼看到的「牆的形狀」就是玩家實際會被擋下來的形狀，徹底消除視覺 / 碰撞的偏移。
+  const rasterW = mapStore.maskWidth
+  const rasterH = mapStore.maskHeight
+  const scaleX  = rasterW / width
+  const scaleY  = rasterH / height
+  const rasterMask = new Uint8Array(rasterW * rasterH)
+  for (const o of outers) rasterizePolygon(o, rasterMask, rasterW, rasterH, scaleX, scaleY, 1)
+  for (const hl of holes) rasterizePolygon(hl, rasterMask, rasterW, rasterH, scaleX, scaleY, 0)
+  collisionMask = rasterMask
+  collisionW    = rasterW
+  collisionH    = rasterH
 
   if (outers.length > 0) {
     const floorMat = new THREE.MeshStandardMaterial({
@@ -596,12 +708,16 @@ function buildPath() {
     roughness: 0.3, metalness: 0.2,
   })
 
-  // store 的 runAStar 會在 straightenPath 之後再跑 axisAlignPath，把斜線改寫為軸向 L 形，
-  // 所以 pathNodes 到這裡其實是階梯狀。這裡用 Bresenham 再做一次最長可視線段簡化，
-  // 恢復為直線捷徑，視覺上與平滑牆面一致；僅限 3D 場景，不動 HomeView 的 2D 路徑。
-  const straight = straightenPathNodes(mapStore.pathNodes as Array<{ x: number; y: number }>)
-  const points = straight.map((p) => {
-    const w = pixelToWorld(p.x, p.y)
+  // pathNodes 來自 centered → aligned → straightened 的降級。軸向 L 形輸出常產生小幅抖動，
+  // 這裡用 DP + Bresenham 驗證簡化：只合併真的抖動（perpDist 小 + chord 可通行），真實轉角保留。
+  // eps 用 3 原始像素；小於典型走廊寬的一半，不會把路徑拉去貼牆。
+  // pixelToWorld 採零偏移公式（px=整數 = mask cell 左邊緣），這裡加半個 mask cell 的偏移
+  // 讓視覺路徑落在 A* 走過的 cell 正中央（僅影響路徑顯示、不動碰撞與玩家渲染）。
+  const raw = mapStore.pathNodes as Array<{ x: number; y: number }>
+  const simplified = dpSimplifyPath(raw, 3)
+  const half = 0.5 / Math.max(sceneUp, 1e-9)
+  const points = simplified.map((p) => {
+    const w = pixelToWorld(p.x + half, p.y + half)
     return new THREE.Vector3(w.x, yLift, w.z)
   })
 
@@ -649,10 +765,48 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
+// 在碰撞遮罩上 BFS 找離 (px, py) 最近的 passable cell，轉回原始像素座標。
+function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
+  if (!collisionMask) return { x: px, y: py }
+  const cx0 = Math.floor(px * pxToColl)
+  const cy0 = Math.floor(py * pxToColl)
+  if (cx0 >= 0 && cx0 < collisionW && cy0 >= 0 && cy0 < collisionH
+      && collisionMask[cy0 * collisionW + cx0] === 1) {
+    return { x: px, y: py }
+  }
+  const seen = new Uint8Array(collisionW * collisionH)
+  const queue: number[] = [cy0 * collisionW + cx0]
+  if (cx0 >= 0 && cx0 < collisionW && cy0 >= 0 && cy0 < collisionH) {
+    seen[cy0 * collisionW + cx0] = 1
+  }
+  while (queue.length > 0) {
+    const idx = queue.shift()!
+    const cx = idx % collisionW
+    const cy = Math.floor(idx / collisionW)
+    if (cx >= 0 && cx < collisionW && cy >= 0 && cy < collisionH
+        && collisionMask[idx] === 1) {
+      return { x: (cx + 0.5) / pxToColl, y: (cy + 0.5) / pxToColl }
+    }
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]] as const) {
+      const nx = cx + dx, ny = cy + dy
+      if (nx < 0 || nx >= collisionW || ny < 0 || ny >= collisionH) continue
+      const ni = ny * collisionW + nx
+      if (seen[ni]) continue
+      seen[ni] = 1
+      queue.push(ni)
+    }
+  }
+  return { x: px, y: py }
+}
+
 function ensureUserState() {
   if (!mapStore.startPoint) return
   if (!mapStore.userPosition) {
-    mapStore.userPosition = { ...mapStore.startPoint }
+    const sp = mapStore.startPoint
+    // 若 startPoint 落在（膨脹 / 碰撞定義下的）牆內，吸附到最近 passable，避免進第一人稱就在牆裡。
+    mapStore.userPosition = isPassableAtPixel(sp.x, sp.y)
+      ? { x: sp.x, y: sp.y }
+      : snapToNearestPassable(sp.x, sp.y)
   }
   if (mapStore.userHeading === null) {
     const nodes = mapStore.pathNodes
@@ -702,20 +856,26 @@ function tryMove(dtSec: number) {
 
   if (moveInput.fwd !== 0) {
     const h = mapStore.userHeading ?? 0
-    const step = moveInput.fwd * MOVE_SPEED_PX * dtSec
-    const ox = mapStore.userPosition.x
-    const oy = mapStore.userPosition.y
-    const nx = ox + Math.cos(h) * step
-    const ny = oy + Math.sin(h) * step
-    // 先嘗試合成對角，再退化為單軸滑行，避免兩軸各自通過卻合成踩進牆角的漏洞。
-    let fx = ox
-    let fy = oy
-    if (isPassableAtPixel(nx, ny)) {
-      fx = nx; fy = ny
-    } else if (isPassableAtPixel(nx, oy)) {
-      fx = nx
-    } else if (isPassableAtPixel(ox, ny)) {
-      fy = ny
+    const totalStep = moveInput.fwd * MOVE_SPEED_PX * dtSec
+    const dirX = Math.cos(h)
+    const dirY = Math.sin(h)
+    // 以 ≤ 0.3 collision cell 為單位切 substep，避免單幀位移大於薄牆厚度時直接穿過去（tunneling）。
+    const maxSubPx = 0.3 / Math.max(pxToColl, 1e-6)
+    const nSub = Math.max(1, Math.ceil(Math.abs(totalStep) / maxSubPx))
+    const subStep = totalStep / nSub
+    let fx = mapStore.userPosition.x
+    let fy = mapStore.userPosition.y
+    for (let i = 0; i < nSub; i++) {
+      const nx = fx + dirX * subStep
+      const ny = fy + dirY * subStep
+      // 對角優先；若只有單軸通則沿該軸滑行並於本幀停住。
+      if (isPassableAtPixel(nx, ny)) {
+        fx = nx; fy = ny
+        continue
+      }
+      if (isPassableAtPixel(nx, fy)) { fx = nx; break }
+      if (isPassableAtPixel(fx, ny)) { fy = ny; break }
+      break
     }
     mapStore.userPosition = { x: fx, y: fy }
   }
