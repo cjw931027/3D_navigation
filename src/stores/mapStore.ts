@@ -89,6 +89,33 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   }
 }
 
+// 驗證節點序列每一條相鄰段在 mask 上的 Bresenham 連線全為 passable。
+// 任一格在牆內或出界即視為無效，用於在後處理失敗時降級。
+function pathAllPassable(
+  nodes: Point[],
+  mask: Uint8Array,
+  width: number,
+  height: number,
+): boolean {
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const a = nodes[i]!, b = nodes[i + 1]!
+    let cx = Math.round(a.x), cy = Math.round(a.y)
+    const tx = Math.round(b.x), ty = Math.round(b.y)
+    const dx = Math.abs(tx - cx), dy = Math.abs(ty - cy)
+    const sx = cx < tx ? 1 : -1, sy = cy < ty ? 1 : -1
+    let err = dx - dy
+    while (true) {
+      if (cx < 0 || cx >= width || cy < 0 || cy >= height) return false
+      if (mask[cy * width + cx] === 0) return false
+      if (cx === tx && cy === ty) break
+      const e2 = err * 2
+      if (e2 > -dy) { err -= dy; cx += sx }
+      if (e2 <  dx) { err += dx; cy += sy }
+    }
+  }
+  return true
+}
+
 // Visibility-graph greedy shortcut：保留起點、每次跳至最遠可直達節點。
 function straightenPath(
   nodes: Point[],
@@ -505,9 +532,16 @@ export const useMapStore = defineStore('map', () => {
       const straightened = straightenPath(raw, maskBytes, maskW, maskH)
       const aligned      = axisAlignPath(straightened, maskBytes, maskW, maskH)
       const centered     = centerlinePath(aligned, maskBytes, maskW, maskH)
-      pathNodes.value = up === 1
+      // axisAlignPath 的 lShape fallback 與 centerlinePath 的 corner 位移都可能產生穿牆段；
+      // 只有 straightened 每段都經 Bresenham 驗證過，依序降級確保最終 path 保證在 passable 內。
+      const final = pathAllPassable(centered, maskBytes, maskW, maskH)
         ? centered
-        : centered.map(p => ({ x: p.x / up, y: p.y / up }))
+        : pathAllPassable(aligned, maskBytes, maskW, maskH)
+          ? aligned
+          : straightened
+      pathNodes.value = up === 1
+        ? final
+        : final.map(p => ({ x: p.x / up, y: p.y / up }))
       return pathNodes.value.length
 
     } catch (err) {
