@@ -1,183 +1,865 @@
 <script setup lang="ts">
 import { ref, toRaw } from 'vue'
 import { useMapStore } from '@/stores/mapStore'
-
-// @ts-ignore
-import loadWasm from '@/wasm/core.js'
+import type { MapMode } from '@/stores/mapStore'
 
 const mapStore = useMapStore()
-const isEngineReady = ref(false)
 const processTime = ref<number | null>(null)
-
-let wasmModule: any = null
-
-// 準備用來顯示 C++ 處理完圖片的 Canvas
+const isRunning = ref(false)
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
-// 1. 啟動 C++ 引擎
-const initEngine = async () => {
+const activeTooltip = ref<string | null>(null)
+const pathStatus = ref<string | null>(null)
+
+const tooltips: Record<string, { problem: string; fix: string }> = {
+  pathColorTolerance: {
+    problem: '識別到的區域太小、路徑顏色不均勻',
+    fix: '往右（數值調高）；若識別到太多不相關區域則往左',
+  },
+  closingKernelSize: {
+    problem: '路上有文字或圖示造成路徑中斷',
+    fix: '往右（數值調高）；若路徑邊緣模糊則往左',
+  },
+  wallThicken: {
+    problem: '路徑從牆壁細縫漏出、蔓延到不該去的區域',
+    fix: '往右（數值調高）；若路徑被截斷、範圍偏小則往左',
+  },
+  sampleRadius: {
+    problem: '種子點採到錯誤顏色（點到邊緣或雜色位置）',
+    fix: '往右（數值調高）；若路面顏色不均勻採色不準則往左',
+  },
+}
+
+const paramLabels: Record<string, string> = {
+  pathColorTolerance: '路色容差',
+  closingKernelSize: '斷點填補',
+  wallThicken: '牆壁加厚',
+  sampleRadius: '採色半徑',
+}
+
+const paramConfig: Record<string, { min: number; max: number; step: number }> = {
+  pathColorTolerance: { min: 5, max: 80, step: 1 },
+  closingKernelSize: { min: 1, max: 9, step: 2 },
+  wallThicken: { min: 0, max: 5, step: 1 },
+  sampleRadius: { min: 3, max: 18, step: 1 },
+}
+
+
+function drawPath(ctx: CanvasRenderingContext2D) {
+  const nodes = mapStore.pathNodes
+  if (nodes.length < 2) return
+
+  ctx.save()
+  ctx.globalCompositeOperation = 'destination-over'
+  ctx.beginPath()
+  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+  ctx.lineWidth = 5
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
+  ctx.stroke()
+  ctx.restore()
+
+  ctx.beginPath()
+  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  ctx.strokeStyle = '#FFD600'
+  ctx.lineWidth = 3
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
+  ctx.stroke()
+}
+
+function drawDot(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  color: string,
+  label: string,
+) {
+  ctx.beginPath()
+  ctx.arc(point.x, point.y, 9, 0, Math.PI * 2)
+  ctx.fillStyle = 'white'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(point.x, point.y, 6, 0, Math.PI * 2)
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.fillStyle = color
+  ctx.font = 'bold 13px sans-serif'
+  ctx.fillText(label, point.x + 11, point.y - 5)
+}
+
+function drawOverlay(ctx: CanvasRenderingContext2D) {
+  if (mapStore.pathNodes.length >= 2) drawPath(ctx)
+  if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
+  if (mapStore.endPoint) drawDot(ctx, mapStore.endPoint, '#F44336', '終點')
+}
+
+function renderToCanvas(
+  buffer: Uint8ClampedArray,
+  width: number,
+  height: number,
+): CanvasRenderingContext2D | null {
+  const canvas = previewCanvas.value
+  if (!canvas) return null
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(buffer as any, width, height), 0, 0)
+  return ctx
+}
+
+const runFloodFill = () => {
+  if (!mapStore.wasmModule) return alert('引擎尚未就緒')
+  const rawData = toRaw(mapStore.imageRawData)
+  if (!rawData || mapStore.mapWidth === 0) return alert('尚未載入地圖')
+  if (!mapStore.seedPoint) return alert('缺少種子點，請回上傳頁重新標記')
+
+  const width = mapStore.mapWidth
+  const height = mapStore.mapHeight
+  const p = mapStore.floodFillParams
+  const seed = mapStore.seedPoint
+  const up = mapStore.upscaleFactor
+
+  const W2 = width * up
+  const H2 = height * up
+  const size2 = W2 * H2 * 4
+
+  isRunning.value = true
+  pathStatus.value = null
+
   try {
-    wasmModule = await loadWasm()
-    isEngineReady.value = true
-    console.log('C++ WebAssembly 引擎啟動成功', wasmModule)
-  } catch (error) {
-    console.error('引擎啟動失敗:', error)
-    alert('引擎啟動失敗，請檢查 F12 Console')
+    const t0 = performance.now()
+
+    // 最近鄰上採樣，放大後的 buffer 送 WASM。
+    let sendData: Uint8ClampedArray
+    if (up === 1) {
+      sendData = rawData
+    } else {
+      sendData = new Uint8ClampedArray(size2)
+      for (let y = 0; y < H2; y++) {
+        const sy = (y / up) | 0
+        for (let x = 0; x < W2; x++) {
+          const sx = (x / up) | 0
+          const si = (sy * width + sx) * 4
+          const di = (y * W2 + x) * 4
+          sendData[di] = rawData[si]!
+          sendData[di + 1] = rawData[si + 1]!
+          sendData[di + 2] = rawData[si + 2]!
+          sendData[di + 3] = rawData[si + 3]!
+        }
+      }
+    }
+
+    const pointer = mapStore.wasmModule.allocateMemory(size2) as number
+    mapStore.wasmModule.HEAPU8.set(sendData, pointer)
+
+    // mode: 0 = 色塊圖 RGB，1 = 線稿圖 HSL。
+    const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
+    const normInt = 0
+    const denoiseArea = mapStore.denoiseMinArea * up * up
+    mapStore.wasmModule.intelligentFloodFill(
+      W2,
+      H2,
+      Math.round(seed.x * up),
+      Math.round(seed.y * up),
+      p.pathColorTolerance,
+      p.closingKernelSize,
+      p.wallThicken,
+      p.sampleRadius,
+      modeInt,
+      normInt,
+      denoiseArea,
+    )
+
+    // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
+    const resultUp = new Uint8ClampedArray(size2)
+    resultUp.set(
+      new Uint8ClampedArray(mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size2),
+    )
+
+    let displayBuffer: Uint8ClampedArray
+    if (up === 1) {
+      displayBuffer = resultUp
+    } else {
+      displayBuffer = new Uint8ClampedArray(width * height * 4)
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const sx = x * up
+          const sy = y * up
+          const si = (sy * W2 + sx) * 4
+          const di = (y * width + x) * 4
+          displayBuffer[di] = resultUp[si]!
+          displayBuffer[di + 1] = resultUp[si + 1]!
+          displayBuffer[di + 2] = resultUp[si + 2]!
+          displayBuffer[di + 3] = resultUp[si + 3]!
+        }
+      }
+    }
+    mapStore.floodFillResultData = displayBuffer
+
+    const maskPtr = mapStore.wasmModule.getPassableMaskBuffer() as number
+    const maskLen = mapStore.wasmModule.getPassableMaskSize() as number
+    const maskW = mapStore.wasmModule.getPassableMaskWidth() as number
+    const maskH = mapStore.wasmModule.getPassableMaskHeight() as number
+    const maskCopy = new Uint8Array(
+      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer,
+      maskPtr,
+      maskLen,
+    ).slice()
+    mapStore.setPassableMask(maskCopy, maskW, maskH)
+
+    mapStore.wasmModule.freeMemory()
+    processTime.value = Math.round(performance.now() - t0)
+
+    // g_passableMask 位於 WASM 全域，freeMemory 後仍可供 A* 使用。
+    let nodeCount = 0
+    if (mapStore.startPoint && mapStore.endPoint) {
+      nodeCount = mapStore.runAStar()
+    }
+
+    const ctx = renderToCanvas(displayBuffer, width, height)
+    if (ctx) drawOverlay(ctx)
+
+    if (nodeCount > 0) {
+      pathStatus.value = `路徑長度 ${nodeCount} 段`
+    } else if (mapStore.startPoint && mapStore.endPoint) {
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
+    }
+  } catch (err) {
+    console.error('runFloodFill 失敗:', err)
+    pathStatus.value = '運算發生錯誤，請查看 console'
+  } finally {
+    isRunning.value = false
   }
 }
 
-// 2. 將 Pinia 裡的圖片傳給 C++ 處理
-const testImageProcess = () => {
-  if (!wasmModule) {
-    return alert('請先啟動 C++ 引擎！')
+const runAStarOnly = () => {
+  if (!mapStore.wasmModule || !mapStore.isEngineReady) return
+  if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
+  if (!mapStore.floodFillResultData) return alert('請先執行一次路徑識別，再使用重算路徑')
+
+  isRunning.value = true
+  pathStatus.value = null
+
+  try {
+    const nodeCount = mapStore.runAStar()
+
+    const ctx = renderToCanvas(mapStore.floodFillResultData, mapStore.mapWidth, mapStore.mapHeight)
+    if (ctx) drawOverlay(ctx)
+
+    if (nodeCount > 0) {
+      pathStatus.value = `路徑長度 ${nodeCount} 段`
+    } else {
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
+    }
+  } catch (err) {
+    console.error('runAStarOnly 失敗:', err)
+    pathStatus.value = '運算發生錯誤，請查看 console'
+  } finally {
+    isRunning.value = false
   }
-  
-  // 使用 toRaw 脫掉 Vue 的 Proxy 外套，拿到乾淨的像素陣列
-  const rawData = toRaw(mapStore.imageRawData)
-  if (!rawData || mapStore.mapWidth === 0) {
-    return alert('請先到「上傳頁」上傳一張平面圖！')
-  }
-
-  const size = rawData.length // 陣列的長度 (像素數量)
-
-  // 開始計時
-  const startTime = performance.now()
-
-  // 步驟 A: 叫 C++ 準備一塊夠大的記憶體，並拿到「地址(Pointer)」
-  const pointer = wasmModule.allocateMemory(size)
-
-  // 步驟 B: 把 JS 的圖片陣列，瞬間倒進這塊 C++ 的記憶體裡！
-  wasmModule.HEAPU8.set(rawData, pointer)
-
-  // 步驟 C: 呼叫 C++ 進行極速運算 (反色濾鏡)
-  wasmModule.invertColors(size)
-
-  // 步驟 D: 算完之後，從 C++ 的記憶體把結果「抓」出來
-  // HEAPU8.buffer 就是 JS 與 C++ 共享的那個記憶體大池子
-  const resultData = new Uint8ClampedArray(
-    wasmModule.HEAPU8.buffer,
-    pointer,
-    size
-  )
-
-  const endTime = performance.now()
-  processTime.value = Math.round(endTime - startTime)
-
-  // 步驟 E: 釋放 C++ 記憶體 (好習慣，避免記憶體洩漏)
-  wasmModule.freeMemory()
-
-  // 步驟 F: 把結果畫到畫面上的 Canvas
-  const canvas = previewCanvas.value
-  if (!canvas) return
-  canvas.width = mapStore.mapWidth
-  canvas.height = mapStore.mapHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-
-  const newImageData = new ImageData(resultData, mapStore.mapWidth, mapStore.mapHeight)
-  ctx.putImageData(newImageData, 0, 0)
 }
 </script>
 
 <template>
   <main class="home-container">
-    <h1>首頁 / C++ 演算法實驗室</h1>
-    
-    <div class="engine-panel">
-      <p>引擎狀態：
-        <span :class="isEngineReady ? 'status-on' : 'status-off'">
-          {{ isEngineReady ? '已啟動' : '未啟動' }}
-        </span>
-      </p>
+    <h1>路徑識別</h1>
 
-      <div class="button-group">
-        <button @click="initEngine" class="btn btn-blue" :disabled="isEngineReady">
-          1. 啟動 C++ 引擎
-        </button>
-
-        <button @click="testImageProcess" class="btn btn-purple" :disabled="!isEngineReady">
-          2. 執行 C++ 影像反色運算
-        </button>
-      </div>
-
-      <div class="result-box" v-if="processTime !== null">
-        C++ 處理幾百萬個像素耗時：<strong>{{ processTime }} 毫秒</strong>
-      </div>
+    <div class="warn-panel" v-if="mapStore.mapWidth === 0">
+      尚未載入地圖，請先前往
+      <router-link to="/upload">上傳地圖</router-link>
+      並完成標記。
     </div>
 
-    <!-- 顯示 C++ 處理完的結果 -->
-    <div class="canvas-container">
-      <h3>C++ 運算結果預覽</h3>
-      <canvas ref="previewCanvas"></canvas>
-    </div>
+    <template v-else>
+      <div class="panel">
+        <!-- 路色預覽 -->
+        <div class="color-row">
+          <div class="color-chip" v-if="mapStore.pathColor">
+            <span
+              class="swatch"
+              :style="{
+                background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
+              }"
+            ></span>
+            路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
+            {{ mapStore.pathColor.b }})
+          </div>
+          <div class="color-chip muted" v-else>路色未採樣</div>
+        </div>
+
+
+        <!-- 靈敏度 -->
+        <div class="section-label" style="margin-top: 20px">
+          辨識靈敏度
+          <span class="sens-badge">{{ mapStore.sensitivity }}</span>
+        </div>
+
+        <div class="sensitivity-wrap">
+          <div class="sensitivity-row">
+            <span class="sens-end-label">精細</span>
+            <div class="slider-with-ticks">
+              <input
+                type="range"
+                :value="mapStore.sensitivity"
+                @input="mapStore.setSensitivity(Number(($event.target as HTMLInputElement).value))"
+                min="1"
+                max="10"
+                step="1"
+                class="sensitivity-slider"
+              />
+              <div class="tick-row">
+                <span
+                  v-for="n in 10"
+                  :key="n"
+                  class="tick"
+                  :class="{ active: mapStore.sensitivity === n }"
+                  >{{ n }}</span
+                >
+              </div>
+            </div>
+            <span class="sens-end-label">寬鬆</span>
+          </div>
+          <div class="sensitivity-guide">
+            <span>識別範圍太小 → 往右</span>
+            <span>識別到多餘區域 → 往左</span>
+          </div>
+        </div>
+
+        <!-- 進階參數（折疊） -->
+        <div class="advanced-toggle" @click="mapStore.showAdvanced = !mapStore.showAdvanced">
+          進階參數
+          <span class="toggle-arrow">{{ mapStore.showAdvanced ? '▲' : '▼' }}</span>
+        </div>
+
+        <div class="advanced-panel" v-if="mapStore.showAdvanced">
+          <div
+            v-for="key in Object.keys(paramLabels) as (keyof typeof paramLabels)[]"
+            :key="key"
+            class="param-row"
+          >
+            <div class="param-label">
+              <span class="param-name">
+                {{ paramLabels[key] }}
+                <span
+                  class="tooltip-trigger"
+                  @mouseenter="activeTooltip = key"
+                  @mouseleave="activeTooltip = null"
+                  @touchstart.prevent="activeTooltip = activeTooltip === key ? null : key"
+                  >?</span
+                >
+                <div class="tooltip-box" v-if="activeTooltip === key">
+                  <p><strong>什麼情況調整：</strong>{{ tooltips[key]!.problem }}</p>
+                  <p><strong>如何調整：</strong>{{ tooltips[key]!.fix }}</p>
+                </div>
+              </span>
+              <strong>{{
+                mapStore.floodFillParams[key as keyof typeof mapStore.floodFillParams]
+              }}</strong>
+            </div>
+            <input
+              type="range"
+              :value="mapStore.floodFillParams[key as keyof typeof mapStore.floodFillParams]"
+              @input="
+                mapStore.setFloodFillParams({
+                  [key]: Number(($event.target as HTMLInputElement).value),
+                })
+              "
+              :min="paramConfig[key]!.min"
+              :max="paramConfig[key]!.max"
+              :step="paramConfig[key]!.step"
+            />
+          </div>
+
+          <!-- 遮罩過濾 -->
+          <div class="preprocess-section">
+            <div class="preprocess-label">遮罩過濾</div>
+            <div class="param-row">
+              <div class="param-label">
+                <span class="param-name">破碎區塊門檻（像素數）</span>
+                <strong>{{ mapStore.denoiseMinArea }}</strong>
+              </div>
+              <input
+                type="range"
+                :value="mapStore.denoiseMinArea"
+                @input="mapStore.denoiseMinArea = Number(($event.target as HTMLInputElement).value)"
+                min="0"
+                max="400"
+                step="10"
+              />
+              <span class="toggle-hint"
+                >BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉</span
+              >
+            </div>
+          </div>
+        </div>
+
+        <!-- 按鈕列 -->
+        <div class="btn-row">
+          <button
+            class="btn-run"
+            @click="runFloodFill"
+            :disabled="!mapStore.isEngineReady || isRunning"
+          >
+            {{ isRunning ? '運算中...' : '執行路徑識別' }}
+          </button>
+          <button
+            class="btn-astar"
+            @click="runAStarOnly"
+            :disabled="
+              !mapStore.isEngineReady ||
+              isRunning ||
+              !mapStore.startPoint ||
+              !mapStore.endPoint ||
+              !mapStore.floodFillResultData
+            "
+            title="保留目前識別結果，重新計算起訖點之間的最短路徑"
+          >
+            重算路徑
+          </button>
+        </div>
+
+        <!-- 結果資訊列 -->
+        <div class="result-row" v-if="processTime !== null || pathStatus !== null">
+          <span class="result-time" v-if="processTime !== null">
+            耗時 <strong>{{ processTime }}</strong> 毫秒
+          </span>
+          <span
+            class="result-path"
+            :class="{ error: pathStatus?.startsWith('找不到') || pathStatus?.startsWith('運算') }"
+            v-if="pathStatus"
+          >
+            {{ pathStatus }}
+          </span>
+        </div>
+      </div>
+
+      <div class="canvas-container">
+        <canvas ref="previewCanvas"></canvas>
+      </div>
+    </template>
   </main>
 </template>
 
 <style scoped>
-.home-container { 
-  padding: 2rem; 
-  text-align: center; 
+.home-container {
+  padding: 2rem;
+  max-width: 900px;
+  margin: 0 auto;
+  text-align: center;
 }
 
-.engine-panel {
-  margin: 20px auto; 
-  padding: 30px; 
-  border: 2px solid #333;
-  border-radius: 12px; 
-  max-width: 500px; 
-  background-color: #f4f4f9;
+h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 1.2rem;
 }
 
-.status-on { color: #4CAF50; font-weight: bold; }
-.status-off { color: #F44336; font-weight: bold; }
-
-.button-group { 
-  display: flex; 
-  flex-direction: column; 
-  gap: 15px; 
-  margin: 20px 0; 
+.warn-panel {
+  margin: 40px auto;
+  max-width: 480px;
+  padding: 20px;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 8px;
+  color: #6d4c00;
+  font-size: 0.92em;
+}
+.warn-panel a {
+  color: #1565c0;
+  font-weight: 600;
 }
 
-.btn { 
-  padding: 12px 20px; 
-  font-size: 16px; 
-  cursor: pointer; 
-  border: none; 
-  border-radius: 5px; 
-  font-weight: bold; 
-  transition: 0.3s; 
+.panel {
+  margin: 0 auto 20px;
+  padding: 22px 24px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  max-width: 600px;
+  background: #f8f9ff;
+  text-align: left;
 }
 
-.btn:disabled { 
-  opacity: 0.5; 
-  cursor: not-allowed; 
+.color-row {
+  display: flex;
+  margin-bottom: 18px;
 }
 
-.btn-blue { background-color: #2196F3; color: white; }
-.btn-blue:not(:disabled):hover { background-color: #0b7dda; }
+.color-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8em;
+  color: #444;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 20px;
+  padding: 4px 12px;
+}
+.color-chip.muted {
+  color: #aaa;
+}
 
-.btn-purple { background-color: #9C27B0; color: white; }
-.btn-purple:not(:disabled):hover { background-color: #7B1FA2; }
+.swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid #aaa;
+  flex-shrink: 0;
+}
 
-.result-box {
-  margin-top: 20px; 
-  padding: 15px; 
-  background-color: white;
-  border: 2px dashed #9C27B0; 
-  border-radius: 8px; 
-  font-size: 1.1em; 
+.section-label {
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #888;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sens-badge {
+  background: #1565c0;
+  color: white;
+  border-radius: 10px;
+  padding: 1px 10px;
+  font-size: 0.88em;
+  letter-spacing: 0;
+  text-transform: none;
+  min-width: 26px;
+  text-align: center;
+}
+
+.sensitivity-wrap {
+  margin-bottom: 4px;
+}
+
+.sensitivity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sens-end-label {
+  font-size: 0.74em;
+  color: #aaa;
+  white-space: nowrap;
+  width: 26px;
+  text-align: center;
+}
+
+.slider-with-ticks {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sensitivity-slider {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #1565c0;
+}
+
+.tick-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 1px;
+}
+
+.tick {
+  font-size: 0.68em;
+  color: #ccc;
+  width: 18px;
+  text-align: center;
+  line-height: 1;
+  transition:
+    color 0.15s,
+    font-weight 0.15s;
+}
+
+.tick.active {
+  color: #1565c0;
+  font-weight: 700;
+}
+
+.sensitivity-guide {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72em;
+  color: #bbb;
+  margin-top: 4px;
+  margin-bottom: 4px;
+  padding: 0 34px;
+}
+
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #aaa;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 10px 0 6px;
+  border-top: 1px solid #e8e8e8;
+  margin-top: 14px;
+  user-select: none;
+  touch-action: manipulation;
+}
+.toggle-arrow {
+  font-size: 0.85em;
+}
+
+.advanced-panel {
+  padding-top: 8px;
+  margin-bottom: 14px;
+}
+
+.param-row {
+  margin-bottom: 14px;
+}
+
+.param-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85em;
   color: #333;
+  margin-bottom: 4px;
+}
+
+.param-name {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.param-label strong {
+  background: #1565c0;
+  color: white;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 0.88em;
+  min-width: 28px;
+  text-align: center;
+}
+
+.param-row input[type='range'] {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #1565c0;
+}
+
+.tooltip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e0e0e0;
+  color: #666;
+  font-size: 0.74em;
+  font-weight: 700;
+  cursor: help;
+  flex-shrink: 0;
+  touch-action: manipulation;
+}
+
+.tooltip-box {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  background: #1a1a2e;
+  color: white;
+  font-size: 0.78em;
+  font-weight: 400;
+  padding: 10px 13px;
+  border-radius: 7px;
+  width: 260px;
+  line-height: 1.55;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+.tooltip-box p {
+  margin: 0 0 5px;
+}
+.tooltip-box p:last-child {
+  margin: 0;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.btn-run {
+  flex: 1;
+  padding: 12px;
+  font-size: 0.95em;
+  font-weight: 700;
+  background: #00bcd4;
+  color: white;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.2s;
+  touch-action: manipulation;
+}
+.btn-run:hover:not(:disabled) {
+  background: #0097a7;
+}
+.btn-run:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-astar {
+  padding: 12px 16px;
+  font-size: 0.88em;
+  font-weight: 700;
+  background: #1565c0;
+  color: white;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.2s;
+  touch-action: manipulation;
+  white-space: nowrap;
+}
+.btn-astar:hover:not(:disabled) {
+  background: #0d47a1;
+}
+.btn-astar:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 0.85em;
+  flex-wrap: wrap;
+}
+
+.result-time {
+  color: #006064;
+}
+
+.result-path {
+  color: #1565c0;
+  font-weight: 500;
+}
+
+.result-path.error {
+  color: #c62828;
 }
 
 .canvas-container {
-  margin-top: 40px;
+  margin-top: 16px;
 }
 
 canvas {
   max-width: 100%;
-  border: 2px solid #ccc;
+  border: 1px solid #ddd;
   border-radius: 8px;
-  background-color: white;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  background: white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* 前處理區 */
+.preprocess-section {
+  border-top: 1px solid #e8e8e8;
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
+.preprocess-label {
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #aaa;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 12px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.88em;
+  font-weight: 600;
+  color: #333;
+  user-select: none;
+}
+
+/* 隱藏原生 checkbox */
+.toggle-label input[type='checkbox'] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 20px;
+  background: #ccc;
+  border-radius: 10px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-label input:checked + .toggle-track {
+  background: #1565c0;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.toggle-label input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(14px);
+}
+
+.toggle-hint {
+  font-size: 0.74em;
+  color: #999;
+  line-height: 1.4;
+  padding-left: 42px;
 }
 </style>

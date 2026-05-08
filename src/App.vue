@@ -1,18 +1,23 @@
 <script setup lang="ts">
-// 把 RouterLink (任意門) 也拿進來用
 import { RouterView, RouterLink } from 'vue-router'
+import { onMounted } from 'vue'
+import { useMapStore } from '@/stores/mapStore'
+
+const mapStore = useMapStore()
+
+onMounted(() => {
+  mapStore.initEngine()
+})
 </script>
 
 <template>
   <div class="app-container">
-    <!-- 這是我們的全域導覽列，它永遠不會消失 -->
     <nav class="navbar">
-      <!-- RouterLink 就是 Vue 版本的 <a> 標籤，但它不會重新整理網頁！ -->
-      <RouterLink to="/" class="nav-btn">回首頁</RouterLink>
-      <RouterLink to="/upload" class="nav-btn">去Upweload頁</RouterLink>
+      <RouterLink to="/" class="nav-btn">🏠 首頁</RouterLink>
+      <RouterLink to="/upload" class="nav-btn">📤 上傳地圖</RouterLink>
+      <RouterLink to="/scene" class="nav-btn">🧊 3D 場景</RouterLink>
     </nav>
 
-    <!-- 下面這台電視機，會根據你點的連結，切換播 Home 或 Upload 的內容 -->
     <div class="content">
       <RouterView />
     </div>
@@ -20,7 +25,6 @@ import { RouterView, RouterLink } from 'vue-router'
 </template>
 
 <style>
-/* 簡單的導覽列樣式 */
 body {
   margin: 0;
   font-family: sans-serif;
@@ -28,28 +32,30 @@ body {
 }
 
 .navbar {
-  background-color: #333;
+  background-color: #1a1a2e;
   padding: 15px;
   text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .nav-btn {
   color: white;
   text-decoration: none;
   margin: 0 10px;
-  padding: 8px 15px;
-  background-color: #555;
+  padding: 8px 18px;
+  background-color: #16213e;
   border-radius: 5px;
   font-weight: bold;
+  transition: 0.2s;
 }
 
 .nav-btn:hover {
-  background-color: #4CAF50;
+  background-color: #0f3460;
 }
 
-/* 當前所在頁面的按鈕會變色 */
 .router-link-active {
-  background-color: #4CAF50;
+  background-color: #00c8ff;
+  color: #1a1a2e;
 }
 
 .content {
