@@ -6,34 +6,34 @@ import { useMapStore } from '@/stores/mapStore'
 const mapStore = useMapStore()
 const router = useRouter()
 
-const mapCanvas     = ref<HTMLCanvasElement | null>(null)
+const mapCanvas = ref<HTMLCanvasElement | null>(null)
 const canvasWrapper = ref<HTMLDivElement | null>(null)
-const magnifier     = ref<HTMLCanvasElement | null>(null)
+const magnifier = ref<HTMLCanvasElement | null>(null)
 
 const statusMessage = ref<string>('請選擇一張室內平面圖')
 const selectionStep = ref<number>(0)
 
-const seedPoint  = ref<{ x: number; y: number } | null>(null)
+const seedPoint = ref<{ x: number; y: number } | null>(null)
 const startPoint = ref<{ x: number; y: number } | null>(null)
-const endPoint   = ref<{ x: number; y: number } | null>(null)
+const endPoint = ref<{ x: number; y: number } | null>(null)
 
 const originalImageData = shallowRef<ImageData | null>(null)
 
 const showMagnifier = ref(false)
-const magnifierPos  = ref({ x: 0, y: 0 })
+const magnifierPos = ref({ x: 0, y: 0 })
 
 // Pinch-to-zoom / pan 狀態
-const scale      = ref(1)
+const scale = ref(1)
 const translateX = ref(0)
 const translateY = ref(0)
 let lastPinchDist = 0
-let isPanning     = false
-let panStart      = { x: 0, y: 0 }
-let panOrigin     = { x: 0, y: 0 }
+let isPanning = false
+let panStart = { x: 0, y: 0 }
+let panOrigin = { x: 0, y: 0 }
 let touchStartTime = 0
-let touchStartX    = 0
-let touchStartY    = 0
-let didPinch       = false
+let touchStartX = 0
+let touchStartY = 0
+let didPinch = false
 
 const stepMessages: Record<number, string> = {
   1: '步驟 1／3　點擊種子點（走廊任意位置）',
@@ -49,11 +49,11 @@ function screenToCanvas(clientX: number, clientY: number): { x: number; y: numbe
   const canvas = mapCanvas.value
   if (!canvas) return { x: -1, y: -1 }
   const cRect = canvas.getBoundingClientRect()
-  const scaleX = canvas.width  / cRect.width
+  const scaleX = canvas.width / cRect.width
   const scaleY = canvas.height / cRect.height
   return {
     x: Math.round((clientX - cRect.left) * scaleX),
-    y: Math.round((clientY - cRect.top)  * scaleY),
+    y: Math.round((clientY - cRect.top) * scaleY),
   }
 }
 
@@ -82,17 +82,25 @@ function updateMagnifier(canvasX: number, canvasY: number) {
   ctx.arc(half, half, half, 0, Math.PI * 2)
   ctx.clip()
   ctx.imageSmoothingEnabled = false
-  ctx.drawImage(src,
-    canvasX - half / ZOOM, canvasY - half / ZOOM,
-    SIZE / ZOOM, SIZE / ZOOM,
-    0, 0, SIZE, SIZE
+  ctx.drawImage(
+    src,
+    canvasX - half / ZOOM,
+    canvasY - half / ZOOM,
+    SIZE / ZOOM,
+    SIZE / ZOOM,
+    0,
+    0,
+    SIZE,
+    SIZE,
   )
   // 準心
   ctx.strokeStyle = 'rgba(0,0,0,0.5)'
   ctx.lineWidth = 1
   ctx.beginPath()
-  ctx.moveTo(half, half - 8); ctx.lineTo(half, half + 8)
-  ctx.moveTo(half - 8, half); ctx.lineTo(half + 8, half)
+  ctx.moveTo(half, half - 8)
+  ctx.lineTo(half, half + 8)
+  ctx.moveTo(half - 8, half)
+  ctx.lineTo(half + 8, half)
   ctx.stroke()
   ctx.restore()
 }
@@ -100,13 +108,13 @@ function updateMagnifier(canvasX: number, canvasY: number) {
 // ── 限制平移範圍 ──────────────────────────────────────────
 
 function clampTranslate() {
-  const canvas  = mapCanvas.value
+  const canvas = mapCanvas.value
   const wrapper = canvasWrapper.value
   if (!canvas || !wrapper) return
-  const wRect   = wrapper.getBoundingClientRect()
-  const scaledW = canvas.offsetWidth  * scale.value
+  const wRect = wrapper.getBoundingClientRect()
+  const scaledW = canvas.offsetWidth * scale.value
   const scaledH = canvas.offsetHeight * scale.value
-  const maxX = Math.max(0, (scaledW - wRect.width)  / 2)
+  const maxX = Math.max(0, (scaledW - wRect.width) / 2)
   const maxY = Math.max(0, (scaledH - wRect.height) / 2)
   translateX.value = Math.min(maxX, Math.max(-maxX, translateX.value))
   translateY.value = Math.min(maxY, Math.max(-maxY, translateY.value))
@@ -126,13 +134,13 @@ function onTouchStart(event: TouchEvent) {
   if (event.touches.length === 1) {
     const t = event.touches[0]!
     touchStartTime = Date.now()
-    touchStartX    = t.clientX
-    touchStartY    = t.clientY
-    didPinch       = false
+    touchStartX = t.clientX
+    touchStartY = t.clientY
+    didPinch = false
 
     if (scale.value > 1.05) {
       isPanning = true
-      panStart  = { x: t.clientX, y: t.clientY }
+      panStart = { x: t.clientX, y: t.clientY }
       panOrigin = { x: translateX.value, y: translateY.value }
     }
   }
@@ -142,20 +150,20 @@ function onTouchMove(event: TouchEvent) {
   event.preventDefault()
 
   if (event.touches.length === 2) {
-    const dist  = getPinchDist(event.touches)
+    const dist = getPinchDist(event.touches)
     const delta = dist / lastPinchDist
     lastPinchDist = dist
 
     const wrapper = canvasWrapper.value
     if (!wrapper) return
     const wRect = wrapper.getBoundingClientRect()
-    const midX  = (event.touches[0]!.clientX + event.touches[1]!.clientX) / 2
-    const midY  = (event.touches[0]!.clientY + event.touches[1]!.clientY) / 2
+    const midX = (event.touches[0]!.clientX + event.touches[1]!.clientX) / 2
+    const midY = (event.touches[0]!.clientY + event.touches[1]!.clientY) / 2
 
-    const newScale  = Math.min(Math.max(scale.value * delta, 1), 5)
+    const newScale = Math.min(Math.max(scale.value * delta, 1), 5)
     const scaleDiff = newScale - scale.value
-    translateX.value -= (midX - wRect.left - wRect.width  / 2) * scaleDiff / newScale
-    translateY.value -= (midY - wRect.top  - wRect.height / 2) * scaleDiff / newScale
+    translateX.value -= ((midX - wRect.left - wRect.width / 2) * scaleDiff) / newScale
+    translateY.value -= ((midY - wRect.top - wRect.height / 2) * scaleDiff) / newScale
     scale.value = newScale
     clampTranslate()
     didPinch = true
@@ -174,7 +182,7 @@ function onTouchMove(event: TouchEvent) {
       const { x, y } = screenToCanvas(t.clientX, t.clientY)
       if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
         showMagnifier.value = true
-        magnifierPos.value  = { x: t.clientX - 130, y: t.clientY - 160 }
+        magnifierPos.value = { x: t.clientX - 130, y: t.clientY - 160 }
         updateMagnifier(x, y)
       }
     }
@@ -191,8 +199,8 @@ function onTouchEnd(event: TouchEvent) {
   }
 
   if (event.changedTouches.length === 1) {
-    const t       = event.changedTouches[0]!
-    const moved   = Math.abs(t.clientX - touchStartX) + Math.abs(t.clientY - touchStartY)
+    const t = event.changedTouches[0]!
+    const moved = Math.abs(t.clientX - touchStartX) + Math.abs(t.clientY - touchStartY)
     const elapsed = Date.now() - touchStartTime
 
     if (moved < 10 && elapsed < 400) {
@@ -216,8 +224,8 @@ onMounted(async () => {
   const wrapper = canvasWrapper.value
   if (wrapper) {
     wrapper.addEventListener('touchstart', onTouchStart, { passive: false })
-    wrapper.addEventListener('touchmove',  onTouchMove,  { passive: false })
-    wrapper.addEventListener('touchend',   onTouchEnd,   { passive: false })
+    wrapper.addEventListener('touchmove', onTouchMove, { passive: false })
+    wrapper.addEventListener('touchend', onTouchEnd, { passive: false })
   }
 
   // 還原快取地圖
@@ -229,23 +237,24 @@ onMounted(async () => {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    canvas.width  = mapStore.mapWidth
+    canvas.width = mapStore.mapWidth
     canvas.height = mapStore.mapHeight
 
     const restored = new ImageData(
       new Uint8ClampedArray(toRaw(mapStore.imageRawData)),
-      mapStore.mapWidth, mapStore.mapHeight
+      mapStore.mapWidth,
+      mapStore.mapHeight,
     )
     originalImageData.value = restored
 
-    if (mapStore.seedPoint)  seedPoint.value  = { ...mapStore.seedPoint  }
+    if (mapStore.seedPoint) seedPoint.value = { ...mapStore.seedPoint }
     if (mapStore.startPoint) startPoint.value = { ...mapStore.startPoint }
-    if (mapStore.endPoint)   endPoint.value   = { ...mapStore.endPoint   }
+    if (mapStore.endPoint) endPoint.value = { ...mapStore.endPoint }
 
-    if (startPoint.value && endPoint.value)  selectionStep.value = 4
-    else if (startPoint.value)               selectionStep.value = 3
-    else if (seedPoint.value)                selectionStep.value = 2
-    else                                     selectionStep.value = 1
+    if (startPoint.value && endPoint.value) selectionStep.value = 4
+    else if (startPoint.value) selectionStep.value = 3
+    else if (seedPoint.value) selectionStep.value = 2
+    else selectionStep.value = 1
 
     redrawCanvas(ctx)
     statusMessage.value = `${canvas.width} × ${canvas.height}`
@@ -258,8 +267,8 @@ onUnmounted(() => {
   const wrapper = canvasWrapper.value
   if (wrapper) {
     wrapper.removeEventListener('touchstart', onTouchStart)
-    wrapper.removeEventListener('touchmove',  onTouchMove)
-    wrapper.removeEventListener('touchend',   onTouchEnd)
+    wrapper.removeEventListener('touchmove', onTouchMove)
+    wrapper.removeEventListener('touchend', onTouchEnd)
   }
 })
 
@@ -283,14 +292,15 @@ const handleFileUpload = (event: Event) => {
 
       // 縮放上限 1200px，保留完整圖片比例
       const MAX = 1200
-      let w = img.naturalWidth, h = img.naturalHeight
+      let w = img.naturalWidth,
+        h = img.naturalHeight
       if (w > MAX || h > MAX) {
         const ratio = Math.min(MAX / w, MAX / h)
         w = Math.round(w * ratio)
         h = Math.round(h * ratio)
       }
 
-      canvas.width  = w
+      canvas.width = w
       canvas.height = h
       ctx.drawImage(img, 0, 0, w, h)
 
@@ -298,11 +308,11 @@ const handleFileUpload = (event: Event) => {
       originalImageData.value = imageData
       mapStore.setMapData(imageData.data, w, h)
 
-      selectionStep.value  = 1
-      statusMessage.value  = `${w} × ${h}`
-      scale.value          = 1
-      translateX.value     = 0
-      translateY.value     = 0
+      selectionStep.value = 1
+      statusMessage.value = `${w} × ${h}`
+      scale.value = 1
+      translateX.value = 0
+      translateY.value = 0
     }
     img.src = (e.target as FileReader).result as string
   }
@@ -321,11 +331,13 @@ const handleMouseMove = (event: MouseEvent) => {
     return
   }
   showMagnifier.value = true
-  magnifierPos.value  = { x: event.clientX - 130, y: event.clientY - 130 }
+  magnifierPos.value = { x: event.clientX - 130, y: event.clientY - 130 }
   updateMagnifier(x, y)
 }
 
-const handleMouseLeave = () => { showMagnifier.value = false }
+const handleMouseLeave = () => {
+  showMagnifier.value = false
+}
 
 const handleCanvasClick = (event: MouseEvent) => {
   const canvas = mapCanvas.value
@@ -364,7 +376,7 @@ function redrawCanvas(ctx: CanvasRenderingContext2D) {
     point: { x: number; y: number },
     color: string,
     label: string,
-    shape: 'circle' | 'square' = 'circle'
+    shape: 'circle' | 'square' = 'circle',
   ) => {
     ctx.beginPath()
     if (shape === 'circle') ctx.arc(point.x, point.y, 9, 0, Math.PI * 2)
@@ -383,17 +395,17 @@ function redrawCanvas(ctx: CanvasRenderingContext2D) {
     ctx.fillText(label, point.x + 11, point.y - 5)
   }
 
-  if (seedPoint.value)  drawDot(seedPoint.value,  '#2196F3', '種子')
+  if (seedPoint.value) drawDot(seedPoint.value, '#2196F3', '種子')
   if (startPoint.value) drawDot(startPoint.value, '#4CAF50', '起點')
-  if (endPoint.value)   drawDot(endPoint.value,   '#F44336', '終點')
+  if (endPoint.value) drawDot(endPoint.value, '#F44336', '終點')
 }
 
 // ── 重設 ──────────────────────────────────────────────────
 
 function resetAll() {
-  seedPoint.value  = null
+  seedPoint.value = null
   startPoint.value = null
-  endPoint.value   = null
+  endPoint.value = null
   if (selectionStep.value === 0) return
   selectionStep.value = 1
   mapStore.setSeedPoint(null)
@@ -408,7 +420,7 @@ function resetAll() {
 function resetStartEnd() {
   if (selectionStep.value < 2) return
   startPoint.value = null
-  endPoint.value   = null
+  endPoint.value = null
   selectionStep.value = 2
   mapStore.setPoints(null, null)
   const canvas = mapCanvas.value
@@ -419,7 +431,7 @@ function resetStartEnd() {
 }
 
 function resetZoom() {
-  scale.value      = 1
+  scale.value = 1
   translateX.value = 0
   translateY.value = 0
 }
@@ -434,7 +446,9 @@ const goToProcess = () => router.push('/')
 
     <!-- 步驟條 -->
     <div class="steps-bar" v-if="selectionStep > 0">
-      <div class="step" :class="{ active: selectionStep >= 1, done: selectionStep > 1 }">種子點</div>
+      <div class="step" :class="{ active: selectionStep >= 1, done: selectionStep > 1 }">
+        種子點
+      </div>
       <div class="step-sep">—</div>
       <div class="step" :class="{ active: selectionStep >= 2, done: selectionStep > 2 }">起點</div>
       <div class="step-sep">—</div>
@@ -447,17 +461,21 @@ const goToProcess = () => router.push('/')
       <div class="btn-group">
         <button v-if="selectionStep > 2" class="btn-sm" @click="resetStartEnd">重設起訖點</button>
         <button v-if="selectionStep > 1" class="btn-sm" @click="resetAll">全部重設</button>
-        <button v-if="scale > 1.05"      class="btn-sm" @click="resetZoom">重置縮放</button>
+        <button v-if="scale > 1.05" class="btn-sm" @click="resetZoom">重置縮放</button>
       </div>
     </div>
 
     <!-- 路色預覽 -->
     <div class="color-row" v-if="mapStore.pathColor">
       <div class="color-chip">
-        <span class="swatch" :style="{
-          background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`
-        }"></span>
-        路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }}, {{ mapStore.pathColor.b }})
+        <span
+          class="swatch"
+          :style="{
+            background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
+          }"
+        ></span>
+        路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
+        {{ mapStore.pathColor.b }})
       </div>
     </div>
 
@@ -468,12 +486,16 @@ const goToProcess = () => router.push('/')
           class="btn-type"
           :class="{ active: mapStore.mapType === 'color-block' }"
           @click="mapStore.setMapType('color-block')"
-        >色塊圖</button>
+        >
+          色塊圖
+        </button>
         <button
           class="btn-type"
           :class="{ active: mapStore.mapType === 'line-art' }"
           @click="mapStore.setMapType('line-art')"
-        >線稿圖</button>
+        >
+          線稿圖
+        </button>
       </div>
     </div>
 
@@ -559,9 +581,18 @@ h2 {
   transition: 0.2s;
 }
 
-.step.active { background: #e3f2fd; color: #1565c0; }
-.step.done   { background: #e8f5e9; color: #2e7d32; }
-.step-sep    { color: #ccc; font-size: 0.85em; }
+.step.active {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+.step.done {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+.step-sep {
+  color: #ccc;
+  font-size: 0.85em;
+}
 
 /* 操作列 */
 .action-bar {
@@ -579,7 +610,10 @@ h2 {
   font-weight: 500;
 }
 
-.btn-group { display: flex; gap: 5px; }
+.btn-group {
+  display: flex;
+  gap: 5px;
+}
 
 .btn-sm {
   padding: 3px 10px;
@@ -593,7 +627,9 @@ h2 {
   transition: background 0.15s;
   touch-action: manipulation;
 }
-.btn-sm:hover { background: #f0f0f0; }
+.btn-sm:hover {
+  background: #f0f0f0;
+}
 
 /* 路色預覽 */
 .color-row {
@@ -624,9 +660,11 @@ h2 {
 }
 
 /* 上傳 */
-.input-section { margin-bottom: 12px; }
+.input-section {
+  margin-bottom: 12px;
+}
 
-input[type="file"] {
+input[type='file'] {
   padding: 7px;
   border: 1px solid #ccc;
   border-radius: 5px;
@@ -640,7 +678,7 @@ input[type="file"] {
    不設 max-height 截斷，讓圖片完整顯示後再可捲動 */
 .canvas-wrapper {
   position: relative;
-  overflow: auto;            /* 圖片超出時可捲動，不裁切 */
+  overflow: auto; /* 圖片超出時可捲動，不裁切 */
   border: 1px dashed #bbb;
   border-radius: 8px;
   background: #f5f5f5;
@@ -652,7 +690,9 @@ input[type="file"] {
   -webkit-user-select: none;
 }
 
-.canvas-wrapper.locked { opacity: 0.88; }
+.canvas-wrapper.locked {
+  opacity: 0.88;
+}
 
 canvas {
   display: block;
@@ -675,7 +715,9 @@ canvas {
 }
 
 /* 下一步 */
-.next-section { margin-top: 20px; }
+.next-section {
+  margin-top: 20px;
+}
 
 .btn-primary {
   padding: 12px 36px;
@@ -689,7 +731,9 @@ canvas {
   transition: background 0.2s;
   touch-action: manipulation;
 }
-.btn-primary:hover { background: #0d47a1; }
+.btn-primary:hover {
+  background: #0d47a1;
+}
 
 .next-section {
   display: flex;
@@ -715,7 +759,9 @@ canvas {
   cursor: pointer;
   touch-action: manipulation;
 }
-.btn-secondary:hover { background: #e3f2fd; }
+.btn-secondary:hover {
+  background: #e3f2fd;
+}
 
 .lm-modal-mask {
   position: fixed;
@@ -752,7 +798,10 @@ canvas {
   font-weight: 700;
   color: #555;
 }
-.lm-modal-close:hover { background: #ddd; color: #c62828; }
+.lm-modal-close:hover {
+  background: #ddd;
+  color: #c62828;
+}
 
 /* 地圖類型列 */
 .map-type-row {
@@ -810,11 +859,15 @@ canvas {
   border-radius: 5px;
   cursor: pointer;
   color: #555;
-  transition: background 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
   touch-action: manipulation;
 }
 
-.btn-type:hover { background: #f0f0f0; }
+.btn-type:hover {
+  background: #f0f0f0;
+}
 
 .btn-type.active {
   background: #1565c0;
