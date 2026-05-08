@@ -45,7 +45,7 @@ struct HSL { float h, s, l; };
 
 
 // RGB轉換成HSL
-HSL rgb2hsl(uint8_t r8, uint8_t g8, uint8_t b8) {
+HSL rgbtohsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
     float mx = std::max({r, g, b}), mn = std::min({r, g, b});
     float l = (mx + mn) * 0.5f; //亮度，rgb的最大最小值相加除2
@@ -75,7 +75,7 @@ float hslDist(HSL a, HSL b) {
     return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
 }
 
-// 依照點選的種子點搜索周圍radius內最常出現的顏色，當作真正的種子點，以防點錯
+// 依照點選的種子點搜索周圍radius內最常出現的顏色，當作真正的種子點，以防點錯(採色半徑)
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
                                        int radius, int quantShift, int topK) {
     std::unordered_map<uint32_t, int> freq;
@@ -135,7 +135,8 @@ RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
     return colors[0];
 }
 
-// 斷點填補功能，將靠近牆壁的點膨脹kSize倍
+// 斷點填補功能，對每個kSize的正方形，如果正方形中有1代表可以走，那就將所有正方形的值設為可以走
+// 因為是要偵測牆壁周圍有沒有可行走區域，所以會比較多牆壁，使用if先判斷可以減少時間
 void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;
@@ -151,6 +152,7 @@ void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
 
 
 // 將斷點填補的點填回去，以及牆壁加厚
+// 因為是在牆壁附近判斷kSize周圍有沒有牆壁，很容易就有牆壁，所以判斷如果有牆壁就停止迴圈，也是會減少時間
 void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;
@@ -167,6 +169,7 @@ void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     mask = result;
 }
 
+// 洪水填充演算法
 int bfsFill(int width, int height, int seedX, int seedY,
             const std::vector<uint8_t>& passableMask,
             bool doColor) {
@@ -207,6 +210,7 @@ int bfsFill(int width, int height, int seedX, int seedY,
     return count;
 }
 
+// 防止使用者起訖點點到牆壁
 bool findNearestPassable(int& sx, int& sy, int width, int height,
                          const std::vector<uint8_t>& mask, int searchR = 12) {
     if (mask[sy * width + sx] == 1) return true;
@@ -256,10 +260,10 @@ std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
 
     std::vector<HSL> protoHSL;
     protoHSL.reserve(pathColors.size());
-    for (auto& c : pathColors) protoHSL.push_back(rgb2hsl(c.r, c.g, c.b));
+    for (auto& c : pathColors) protoHSL.push_back(rgbtohsl(c.r, c.g, c.b));
 
     for (int i = 0; i < total; i++) {
-        HSL px = rgb2hsl(mapBuffer[i*4], mapBuffer[i*4+1], mapBuffer[i*4+2]);
+        HSL px = rgbtohsl(mapBuffer[i*4], mapBuffer[i*4+1], mapBuffer[i*4+2]);
         for (auto& ph : protoHSL) {
             if (hslDist(px, ph) <= hslTolerance) {
                 mask[i] = 1;
@@ -371,9 +375,30 @@ void intelligentFloodFill(int width, int height,
     int sx = seedX, sy = seedY;
     if (!findNearestPassable(sx, sy, width, height, mask, searchR)) return;
 
+    // 先做 connected-component 限制:只保留種子點的連通分量
+    std::vector<uint8_t> seedMask(mask.size(), 0);
+    if (mask[sy * width + sx] == 1) {
+        std::vector<int> q;
+        q.push_back(sy * width + sx);
+        seedMask[sy * width + sx] = 1;
+        const int dx[] = {0,0,-1,1};
+        const int dy[] = {-1,1,0,0};
+        for (int h = 0; h < (int)q.size(); h++) {
+            int idx = q[h];
+            int cx = idx % width, cy = idx / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx[d], ny = cy + dy[d];
+                if (nx<0||nx>=width||ny<0||ny>=height) continue;
+                int ni = ny*width + nx;
+                if (seedMask[ni] == 0 && mask[ni] == 1) {
+                    seedMask[ni] = 1;
+                    q.push_back(ni);
+                }
+            }
+        }
+    }
+    mask = seedMask;
     bfsFill(width, height, sx, sy, mask, true);
-
-
     g_passableMask = mask;
     g_maskWidth    = width;
     g_maskHeight   = height;
@@ -488,51 +513,9 @@ int getPassableMaskSize()    { return (int)g_passableMask.size(); }
 int getPassableMaskWidth()   { return g_maskWidth;  }
 int getPassableMaskHeight()  { return g_maskHeight; }
 
-void floodFill(int width, int height, int seedX, int seedY, int tolerance) {
-    if (mapBuffer == nullptr) return;
-    if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
-
-    int si = (seedY * width + seedX) * 4;
-    uint8_t tR = mapBuffer[si], tG = mapBuffer[si+1], tB = mapBuffer[si+2];
-    int tolSq = tolerance * tolerance;
-
-    std::vector<bool> visited(width * height, false);
-    std::vector<int> qX, qY;
-    qX.reserve(width * height / 4);
-    qY.reserve(width * height / 4);
-    qX.push_back(seedX); qY.push_back(seedY);
-    visited[seedY * width + seedX] = true;
-
-    const int dx[] = {0, 0, -1, 1};
-    const int dy[] = {-1, 1, 0, 0};
-    int head = 0;
-
-    while (head < (int)qX.size()) {
-        int cx = qX[head], cy = qY[head++];
-        int pi = (cy * width + cx) * 4;
-        mapBuffer[pi]   = 0;
-        mapBuffer[pi+1] = 200;
-        mapBuffer[pi+2] = 255;
-        for (int i = 0; i < 4; i++) {
-            int nx = cx + dx[i], ny = cy + dy[i];
-            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-            int ni = ny * width + nx;
-            if (!visited[ni]) {
-                int npi = ni * 4;
-                if (colorDistSq(mapBuffer[npi], mapBuffer[npi+1], mapBuffer[npi+2],
-                                tR, tG, tB) <= tolSq) {
-                    visited[ni] = true;
-                    qX.push_back(nx); qY.push_back(ny);
-                }
-            }
-        }
-    }
-}
-
 EMSCRIPTEN_BINDINGS(my_module) {
     function("allocateMemory",        &allocateMemory);
     function("freeMemory",            &freeMemory);
-    function("floodFill",             &floodFill);
     function("intelligentFloodFill",  &intelligentFloodFill);
     function("runAStar",              &runAStar);
     function("getPathBuffer",         &getPathBuffer);

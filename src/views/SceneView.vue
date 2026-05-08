@@ -110,11 +110,23 @@ function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
         const i = y * w + x
         if (data[i] !== 0) continue
         let passNb = 0
-        let total  = 0
-        if (x > 0)     { total++; if (data[i - 1] === 1) passNb++ }
-        if (x < w - 1) { total++; if (data[i + 1] === 1) passNb++ }
-        if (y > 0)     { total++; if (data[i - w] === 1) passNb++ }
-        if (y < h - 1) { total++; if (data[i + w] === 1) passNb++ }
+        let total = 0
+        if (x > 0) {
+          total++
+          if (data[i - 1] === 1) passNb++
+        }
+        if (x < w - 1) {
+          total++
+          if (data[i + 1] === 1) passNb++
+        }
+        if (y > 0) {
+          total++
+          if (data[i - w] === 1) passNb++
+        }
+        if (y < h - 1) {
+          total++
+          if (data[i + w] === 1) passNb++
+        }
         if (total >= 3 && passNb >= 3) {
           data[i] = 1
           changed = true
@@ -157,7 +169,10 @@ function dilatePassable(data: Uint8Array, w: number, h: number, iters: number): 
 // 外圍補 1 格 0 再做 N 次 3x3 box blur；把二值遮罩轉為 0..1 連續場，讓 iso-contour 可以吃到斜線特徵。
 // passes 加大會更平滑但會吃掉 1 格寬的薄牆；1 pass 對 2+ 格的牆保留良好。
 function blurToField(
-  data: Uint8Array, w: number, h: number, passes: number,
+  data: Uint8Array,
+  w: number,
+  h: number,
+  passes: number,
 ): { field: Float32Array; pw: number; ph: number } {
   const pw = w + 2
   const ph = h + 2
@@ -171,7 +186,8 @@ function blurToField(
     const next = new Float32Array(pw * ph)
     for (let y = 0; y < ph; y++) {
       for (let x = 0; x < pw; x++) {
-        let sum = 0, n = 0
+        let sum = 0,
+          n = 0
         for (let dy = -1; dy <= 1; dy++) {
           const yy = y + dy
           if (yy < 0 || yy >= ph) continue
@@ -195,7 +211,7 @@ function blurToField(
 // 輸出座標已扣除 padding 偏移，與原始 (w, h) grid corner 對齊。
 function traceContours(data: Uint8Array, w: number, h: number): Pt[][] {
   const BLUR_PASSES = 2
-  const THRESHOLD  = 0.5
+  const THRESHOLD = 0.5
   const { field, pw, ph } = blurToField(data, w, h, BLUR_PASSES)
 
   // Edge id：水平邊 (y, xl) in [0..ph] x [0..pw-1]；垂直邊 (x, yt) in [0..pw] x [0..ph-1]。
@@ -204,8 +220,8 @@ function traceContours(data: Uint8Array, w: number, h: number): Pt[][] {
   const horzId = (y: number, xl: number) => HORZ_BASE + y * pw + xl
   const vertId = (x: number, yt: number) => VERT_BASE + x * ph + yt
 
-  const edgePos   = new Map<number, Pt>()
-  const nextEdge  = new Map<number, number[]>()
+  const edgePos = new Map<number, Pt>()
+  const nextEdge = new Map<number, number[]>()
   const addSeg = (from: number, to: number) => {
     const arr = nextEdge.get(from)
     if (arr) arr.push(to)
@@ -237,39 +253,111 @@ function traceContours(data: Uint8Array, w: number, h: number): Pt[][] {
       const eB = horzId(cy + 1, cx)
       const eL = vertId(cx, cy)
       const eR = vertId(cx + 1, cy)
-      const setT = () => { if (!edgePos.has(eT)) edgePos.set(eT, hcross(tl, tr, cx, cy)) }
-      const setB = () => { if (!edgePos.has(eB)) edgePos.set(eB, hcross(bl, br, cx, cy + 1)) }
-      const setL = () => { if (!edgePos.has(eL)) edgePos.set(eL, vcross(tl, bl, cx, cy)) }
-      const setR = () => { if (!edgePos.has(eR)) edgePos.set(eR, vcross(tr, br, cx + 1, cy)) }
+      const setT = () => {
+        if (!edgePos.has(eT)) edgePos.set(eT, hcross(tl, tr, cx, cy))
+      }
+      const setB = () => {
+        if (!edgePos.has(eB)) edgePos.set(eB, hcross(bl, br, cx, cy + 1))
+      }
+      const setL = () => {
+        if (!edgePos.has(eL)) edgePos.set(eL, vcross(tl, bl, cx, cy))
+      }
+      const setR = () => {
+        if (!edgePos.has(eR)) edgePos.set(eR, vcross(tr, br, cx + 1, cy))
+      }
 
       // 方向取「passable 位於行進方向右側」= CW 繞 passable 區，與舊版 signedArea 分類相容。
       switch (code) {
-        case 1:  setL(); setB(); addSeg(eL, eB); break
-        case 2:  setB(); setR(); addSeg(eB, eR); break
-        case 3:  setL(); setR(); addSeg(eL, eR); break
-        case 4:  setR(); setT(); addSeg(eR, eT); break
+        case 1:
+          setL()
+          setB()
+          addSeg(eL, eB)
+          break
+        case 2:
+          setB()
+          setR()
+          addSeg(eB, eR)
+          break
+        case 3:
+          setL()
+          setR()
+          addSeg(eL, eR)
+          break
+        case 4:
+          setR()
+          setT()
+          addSeg(eR, eT)
+          break
         case 5: {
-          setL(); setT(); setR(); setB()
+          setL()
+          setT()
+          setR()
+          setB()
           const ctr = (tl + tr + br + bl) * 0.25
-          if (ctr >= THRESHOLD) { addSeg(eL, eT); addSeg(eB, eR) }
-          else                  { addSeg(eL, eB); addSeg(eR, eT) }
+          if (ctr >= THRESHOLD) {
+            addSeg(eL, eT)
+            addSeg(eB, eR)
+          } else {
+            addSeg(eL, eB)
+            addSeg(eR, eT)
+          }
           break
         }
-        case 6:  setB(); setT(); addSeg(eB, eT); break
-        case 7:  setL(); setT(); addSeg(eL, eT); break
-        case 8:  setT(); setL(); addSeg(eT, eL); break
-        case 9:  setT(); setB(); addSeg(eT, eB); break
+        case 6:
+          setB()
+          setT()
+          addSeg(eB, eT)
+          break
+        case 7:
+          setL()
+          setT()
+          addSeg(eL, eT)
+          break
+        case 8:
+          setT()
+          setL()
+          addSeg(eT, eL)
+          break
+        case 9:
+          setT()
+          setB()
+          addSeg(eT, eB)
+          break
         case 10: {
-          setL(); setT(); setR(); setB()
+          setL()
+          setT()
+          setR()
+          setB()
           const ctr = (tl + tr + br + bl) * 0.25
-          if (ctr >= THRESHOLD) { addSeg(eT, eR); addSeg(eB, eL) }
-          else                  { addSeg(eT, eL); addSeg(eB, eR) }
+          if (ctr >= THRESHOLD) {
+            addSeg(eT, eR)
+            addSeg(eB, eL)
+          } else {
+            addSeg(eT, eL)
+            addSeg(eB, eR)
+          }
           break
         }
-        case 11: setT(); setR(); addSeg(eT, eR); break
-        case 12: setR(); setL(); addSeg(eR, eL); break
-        case 13: setR(); setB(); addSeg(eR, eB); break
-        case 14: setB(); setL(); addSeg(eB, eL); break
+        case 11:
+          setT()
+          setR()
+          addSeg(eT, eR)
+          break
+        case 12:
+          setR()
+          setL()
+          addSeg(eR, eL)
+          break
+        case 13:
+          setR()
+          setB()
+          addSeg(eR, eB)
+          break
+        case 14:
+          setB()
+          setL()
+          addSeg(eB, eL)
+          break
       }
     }
   }
@@ -280,12 +368,18 @@ function traceContours(data: Uint8Array, w: number, h: number): Pt[][] {
     if (it.done) break
     const startId = it.value
     const startPos = edgePos.get(startId)
-    if (!startPos) { nextEdge.delete(startId); continue }
+    if (!startPos) {
+      nextEdge.delete(startId)
+      continue
+    }
     const contour: Pt[] = [{ x: startPos.x, y: startPos.y }]
     let cur = startId
     while (true) {
       const list = nextEdge.get(cur)
-      if (!list || list.length === 0) { nextEdge.delete(cur); break }
+      if (!list || list.length === 0) {
+        nextEdge.delete(cur)
+        break
+      }
       const nxt = list.shift()!
       if (list.length === 0) nextEdge.delete(cur)
       cur = nxt
@@ -298,7 +392,11 @@ function traceContours(data: Uint8Array, w: number, h: number): Pt[][] {
   }
 
   // 扣除 1 格 padding 偏移，回到原始 (w, h) grid-corner 座標系。
-  for (const c of out) for (const p of c) { p.x -= 1; p.y -= 1 }
+  for (const c of out)
+    for (const p of c) {
+      p.x -= 1
+      p.y -= 1
+    }
   return out
 }
 
@@ -313,10 +411,12 @@ function signedArea(poly: Pt[]): number {
 }
 
 function perpDist2(p: Pt, a: Pt, b: Pt): number {
-  const dx = b.x - a.x, dy = b.y - a.y
+  const dx = b.x - a.x,
+    dy = b.y - a.y
   const L2 = dx * dx + dy * dy
   if (L2 === 0) {
-    const ex = p.x - a.x, ey = p.y - a.y
+    const ex = p.x - a.x,
+      ey = p.y - a.y
     return ex * ex + ey * ey
   }
   const cross = dx * (p.y - a.y) - dy * (p.x - a.x)
@@ -331,10 +431,14 @@ function dpOpen(pts: Pt[], eps2: number): Pt[] {
   const stack: Array<[number, number]> = [[0, pts.length - 1]]
   while (stack.length > 0) {
     const [lo, hi] = stack.pop()!
-    let maxD = 0, idx = -1
+    let maxD = 0,
+      idx = -1
     for (let i = lo + 1; i < hi; i++) {
       const d = perpDist2(pts[i]!, pts[lo]!, pts[hi]!)
-      if (d > maxD) { maxD = d; idx = i }
+      if (d > maxD) {
+        maxD = d
+        idx = i
+      }
     }
     if (maxD > eps2 && idx !== -1) {
       keep[idx] = 1
@@ -350,21 +454,34 @@ function dpOpen(pts: Pt[], eps2: number): Pt[] {
 function dpClosed(pts: Pt[], eps: number): Pt[] {
   if (pts.length < 4) return pts.slice()
   const eps2 = eps * eps
-  let i1 = 0, maxD = -1
+  let i1 = 0,
+    maxD = -1
   for (let i = 1; i < pts.length; i++) {
-    const dx = pts[i]!.x - pts[0]!.x, dy = pts[i]!.y - pts[0]!.y
+    const dx = pts[i]!.x - pts[0]!.x,
+      dy = pts[i]!.y - pts[0]!.y
     const d = dx * dx + dy * dy
-    if (d > maxD) { maxD = d; i1 = i }
+    if (d > maxD) {
+      maxD = d
+      i1 = i
+    }
   }
   let i0 = 0
   maxD = -1
   for (let i = 0; i < pts.length; i++) {
     if (i === i1) continue
-    const dx = pts[i]!.x - pts[i1]!.x, dy = pts[i]!.y - pts[i1]!.y
+    const dx = pts[i]!.x - pts[i1]!.x,
+      dy = pts[i]!.y - pts[i1]!.y
     const d = dx * dx + dy * dy
-    if (d > maxD) { maxD = d; i0 = i }
+    if (d > maxD) {
+      maxD = d
+      i0 = i
+    }
   }
-  if (i0 > i1) { const t = i0; i0 = i1; i1 = t }
+  if (i0 > i1) {
+    const t = i0
+    i0 = i1
+    i1 = t
+  }
   const s1 = pts.slice(i0, i1 + 1)
   const s2 = pts.slice(i1).concat(pts.slice(0, i0 + 1))
   const r1 = dpOpen(s1, eps2)
@@ -375,10 +492,11 @@ function dpClosed(pts: Pt[], eps: number): Pt[] {
 function pointInPolygon(p: Pt, poly: Pt[]): boolean {
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i]!.x, yi = poly[i]!.y
-    const xj = poly[j]!.x, yj = poly[j]!.y
-    const hit = ((yi > p.y) !== (yj > p.y)) &&
-      (p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi)
+    const xi = poly[i]!.x,
+      yi = poly[i]!.y
+    const xj = poly[j]!.x,
+      yj = poly[j]!.y
+    const hit = yi > p.y !== yj > p.y && p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi
     if (hit) inside = !inside
   }
   return inside
@@ -388,7 +506,8 @@ function pointInPolygon(p: Pt, poly: Pt[]): boolean {
 // passableMask 上 Bresenham 可通行，就丟棄。用於清除 store 端 axisAlignPath 產生的
 // 小範圍軸向抖動；有真實轉彎（perpDist > eps）時會保留，不會把路徑拉去貼牆。
 function dpSimplifyPath(
-  nodes: Array<{ x: number; y: number }>, epsPx: number,
+  nodes: Array<{ x: number; y: number }>,
+  epsPx: number,
 ): Array<{ x: number; y: number }> {
   const n = nodes.length
   if (n <= 2) return nodes.slice()
@@ -398,18 +517,28 @@ function dpSimplifyPath(
   const H = mapStore.maskHeight
   const up = mapStore.upscaleFactor || 1
   const linePass = (ax: number, ay: number, bx: number, by: number): boolean => {
-    let cx = Math.round(ax * up), cy = Math.round(ay * up)
-    const tx = Math.round(bx * up), ty = Math.round(by * up)
-    const dx = Math.abs(tx - cx), dy = Math.abs(ty - cy)
-    const sx = cx < tx ? 1 : -1, sy = cy < ty ? 1 : -1
+    let cx = Math.round(ax * up),
+      cy = Math.round(ay * up)
+    const tx = Math.round(bx * up),
+      ty = Math.round(by * up)
+    const dx = Math.abs(tx - cx),
+      dy = Math.abs(ty - cy)
+    const sx = cx < tx ? 1 : -1,
+      sy = cy < ty ? 1 : -1
     let err = dx - dy
     while (true) {
       if (cx < 0 || cx >= W || cy < 0 || cy >= H) return false
       if (mask[cy * W + cx] === 0) return false
       if (cx === tx && cy === ty) break
       const e2 = err * 2
-      if (e2 > -dy) { err -= dy; cx += sx }
-      if (e2 <  dx) { err += dx; cy += sy }
+      if (e2 > -dy) {
+        err -= dy
+        cx += sx
+      }
+      if (e2 < dx) {
+        err += dx
+        cy += sy
+      }
     }
     return true
   }
@@ -421,21 +550,28 @@ function dpSimplifyPath(
   while (stack.length > 0) {
     const [lo, hi] = stack.pop()!
     if (hi - lo < 2) continue
-    const a = nodes[lo]!, b = nodes[hi]!
-    const dx = b.x - a.x, dy = b.y - a.y
+    const a = nodes[lo]!,
+      b = nodes[hi]!
+    const dx = b.x - a.x,
+      dy = b.y - a.y
     const L2 = dx * dx + dy * dy
-    let maxD = 0, idx = -1
+    let maxD = 0,
+      idx = -1
     for (let i = lo + 1; i < hi; i++) {
       const p = nodes[i]!
       let d
       if (L2 < 1e-9) {
-        const ex = p.x - a.x, ey = p.y - a.y
+        const ex = p.x - a.x,
+          ey = p.y - a.y
         d = ex * ex + ey * ey
       } else {
         const cross = dx * (p.y - a.y) - dy * (p.x - a.x)
-        d = cross * cross / L2
+        d = (cross * cross) / L2
       }
-      if (d > maxD) { maxD = d; idx = i }
+      if (d > maxD) {
+        maxD = d
+        idx = i
+      }
     }
     const canSkip = maxD <= eps2 && linePass(a.x, a.y, b.x, b.y)
     if (!canSkip && idx !== -1) {
@@ -451,14 +587,20 @@ function dpSimplifyPath(
 // 掃描線光柵化：把多邊形以 even-odd fill 寫入 mask。座標經 scale 從 display grid 轉到 mask grid。
 // 以 pixel center (cx + 0.5, cy + 0.5) 取樣判斷是否在多邊形內部。
 function rasterizePolygon(
-  poly: Pt[], mask: Uint8Array, w: number, h: number,
-  scaleX: number, scaleY: number, value: 0 | 1,
+  poly: Pt[],
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  scaleX: number,
+  scaleY: number,
+  value: 0 | 1,
 ) {
   const n = poly.length
   if (n < 3) return
   const xs = new Float32Array(n)
   const ys = new Float32Array(n)
-  let yMin = Infinity, yMax = -Infinity
+  let yMin = Infinity,
+    yMax = -Infinity
   for (let i = 0; i < n; i++) {
     xs[i] = poly[i]!.x * scaleX
     ys[i] = poly[i]!.y * scaleY
@@ -473,7 +615,8 @@ function rasterizePolygon(
     crosses.length = 0
     for (let i = 0; i < n; i++) {
       const j = (i + 1) % n
-      const ay = ys[i]!, by = ys[j]!
+      const ay = ys[i]!,
+        by = ys[j]!
       if ((ay <= ysa && by > ysa) || (by <= ysa && ay > ysa)) {
         const t = (ysa - ay) / (by - ay)
         crosses.push(xs[i]! + t * (xs[j]! - xs[i]!))
@@ -514,10 +657,10 @@ function isPassableAtPixel(px: number, py: number): boolean {
   if (collisionMask[cy * collisionW + cx] !== 1) return false
   const fx = cu - cx
   const fy = cv - cy
-  if (fx < COLLISION_MARGIN       && !isCollCellPassable(cx - 1, cy)) return false
-  if (fx > 1 - COLLISION_MARGIN   && !isCollCellPassable(cx + 1, cy)) return false
-  if (fy < COLLISION_MARGIN       && !isCollCellPassable(cx, cy - 1)) return false
-  if (fy > 1 - COLLISION_MARGIN   && !isCollCellPassable(cx, cy + 1)) return false
+  if (fx < COLLISION_MARGIN && !isCollCellPassable(cx - 1, cy)) return false
+  if (fx > 1 - COLLISION_MARGIN && !isCollCellPassable(cx + 1, cy)) return false
+  if (fy < COLLISION_MARGIN && !isCollCellPassable(cx, cy - 1)) return false
+  if (fy > 1 - COLLISION_MARGIN && !isCollCellPassable(cx, cy + 1)) return false
   return true
 }
 
@@ -525,29 +668,25 @@ function buildGeometry() {
   disposeGroup(mapGroup)
   if (!mapStore.passableMask) return
 
-  const ds = downsampleMask(
-    mapStore.passableMask,
-    mapStore.maskWidth,
-    mapStore.maskHeight,
-  )
+  const ds = downsampleMask(mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight)
   const { data, width, height } = ds
 
   // 視覺網格與世界座標共用同一套 cellSize，並用於碰撞檢查。
-  const dispCell   = MAP_EXTENT / Math.max(width, height)
+  const dispCell = MAP_EXTENT / Math.max(width, height)
   const wallHeight = dispCell * WALL_HEIGHT_RATIO
-  const halfW      = (width  * dispCell) / 2
-  const halfH      = (height * dispCell) / 2
+  const halfW = (width * dispCell) / 2
+  const halfH = (height * dispCell) / 2
 
-  sceneCellSize   = dispCell
-  sceneHalfW      = halfW
-  sceneHalfH      = halfH
-  sceneUp         = mapStore.upscaleFactor || 1
+  sceneCellSize = dispCell
+  sceneHalfW = halfW
+  sceneHalfH = halfH
+  sceneUp = mapStore.upscaleFactor || 1
   sceneWallHeight = wallHeight
-  sceneEyeHeight  = wallHeight * 0.75
+  sceneEyeHeight = wallHeight * 0.75
 
   // collisionMask 在下方 outers / holes 分類後由視覺多邊形光柵化產生，
   // 讓碰撞與視覺完全一致；這裡只先設與之對應的座標比例。
-  pxToColl    = sceneUp
+  pxToColl = sceneUp
   pxToDisplay = (sceneUp * width) / mapStore.maskWidth
 
   // Grid-corner 座標轉世界 XZ。
@@ -562,46 +701,42 @@ function buildGeometry() {
   // 使簡化後的牆面一定覆蓋原始 passable 區邊界；碰撞仍使用未膨脹的 data。
   const visualMask = dilatePassable(data, width, height, 1)
   const rawContours = traceContours(visualMask, width, height)
-  const simplified = rawContours
-    .map((c) => dpClosed(c, DP_EPS))
-    .filter((c) => c.length >= 3)
+  const simplified = rawContours.map((c) => dpClosed(c, DP_EPS)).filter((c) => c.length >= 3)
 
   // 有向面積分類：正 = passable 區外輪廓，負 = passable 區內的障礙物（洞）。
   const outers: Pt[][] = []
-  const holes:  Pt[][] = []
+  const holes: Pt[][] = []
   for (const c of simplified) {
     if (signedArea(c) > 0) outers.push(c)
-    else                   holes.push(c)
+    else holes.push(c)
   }
 
   // 將視覺多邊形光柵化回 passableMask 解析度作為碰撞 mask：
   // 肉眼看到的「牆的形狀」就是玩家實際會被擋下來的形狀，徹底消除視覺 / 碰撞的偏移。
   const rasterW = mapStore.maskWidth
   const rasterH = mapStore.maskHeight
-  const scaleX  = rasterW / width
-  const scaleY  = rasterH / height
+  const scaleX = rasterW / width
+  const scaleY = rasterH / height
   const rasterMask = new Uint8Array(rasterW * rasterH)
   for (const o of outers) rasterizePolygon(o, rasterMask, rasterW, rasterH, scaleX, scaleY, 1)
   for (const hl of holes) rasterizePolygon(hl, rasterMask, rasterW, rasterH, scaleX, scaleY, 0)
   collisionMask = rasterMask
-  collisionW    = rasterW
-  collisionH    = rasterH
+  collisionW = rasterW
+  collisionH = rasterH
 
   if (outers.length > 0) {
     const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x7fb8ff, roughness: 0.85, metalness: 0.05,
+      color: 0x7fb8ff,
+      roughness: 0.85,
+      metalness: 0.05,
       side: THREE.DoubleSide,
     })
     const shapes: THREE.Shape[] = []
     for (const outer of outers) {
-      const shape = new THREE.Shape(
-        outer.map((p) => new THREE.Vector2(toWX(p.x), toWZ(p.y))),
-      )
+      const shape = new THREE.Shape(outer.map((p) => new THREE.Vector2(toWX(p.x), toWZ(p.y))))
       for (const hole of holes) {
         if (pointInPolygon(hole[0]!, outer)) {
-          shape.holes.push(new THREE.Path(
-            hole.map((p) => new THREE.Vector2(toWX(p.x), toWZ(p.y))),
-          ))
+          shape.holes.push(new THREE.Path(hole.map((p) => new THREE.Vector2(toWX(p.x), toWZ(p.y)))))
         }
       }
       shapes.push(shape)
@@ -611,14 +746,16 @@ function buildGeometry() {
     mapGroup.add(new THREE.Mesh(floorGeo, floorMat))
   }
 
-  // 牆面：沿 outer 與 hole 走一圈，每個輪廓點共用給相鄰兩段；法線取兩段段法線平均，
-  // 讓平滑段（斜線）連續著色、真正的直角（段法線夾角大）則退化為獨立頂點保留硬邊。
+  // 牆面：沿輪廓建立有厚度的封閉體，避免薄面被 camera.near 切穿後看到外面。
+  // 內側面位置與輪廓完全一致（碰撞 mask 已從相同輪廓光柵化），厚度只朝 passable 反方向 (+snx)
+  // 生長；outer 與 hole 的 snx 語意一致皆指向牆外，故同一套邏輯處理。
   const wallPolys: Pt[][] = [...outers, ...holes]
   if (wallPolys.length > 0) {
-    const SHARP_DOT = 0.5   // 相鄰段法線 dot 低於此值視為硬邊（約 60 度以上轉折）
+    const SHARP_DOT = 0.5
+    const THICKNESS = dispCell * 0.25
     const positions: number[] = []
-    const normals:   number[] = []
-    const indices:   number[] = []
+    const normals: number[] = []
+    const indices: number[] = []
     let vbase = 0
     for (const poly of wallPolys) {
       const n = poly.length
@@ -630,60 +767,149 @@ function buildGeometry() {
       for (let i = 0; i < n; i++) {
         const a = poly[i]!
         const b = poly[(i + 1) % n]!
-        const ax = toWX(a.x), az = toWZ(a.y)
-        const bx = toWX(b.x), bz = toWZ(b.y)
-        sx[i] = ax; sz[i] = az
-        const dx = bx - ax, dz = bz - az
+        const ax = toWX(a.x),
+          az = toWZ(a.y)
+        const bx = toWX(b.x),
+          bz = toWZ(b.y)
+        sx[i] = ax
+        sz[i] = az
+        const dx = bx - ax,
+          dz = bz - az
         const L = Math.hypot(dx, dz) || 1
         snx[i] = -dz / L
-        snz[i] =  dx / L
+        snz[i] = dx / L
       }
-      // 每個輪廓點視轉折角度決定 1 組頂點（平滑）或 2 組頂點（硬邊）。
-      const startBot: number[] = new Array(n)   // 指向該點「作為下一段起點」時的 bottom vertex index
-      const endBot:   number[] = new Array(n)   // 指向該點「作為上一段終點」時的 bottom vertex index
+
+      // 每個輪廓點的外側偏移位置：沿平均段法線方向，以 miter 縮放維持兩側相鄰牆面的等厚度；
+      // 夾角過尖時截斷避免無限延伸（DP eps=1 後實際不會出現銳角，但保險）。
+      const offX = new Float32Array(n)
+      const offZ = new Float32Array(n)
+      for (let i = 0; i < n; i++) {
+        const prev = (i - 1 + n) % n
+        let nx = snx[prev]! + snx[i]!
+        let nz = snz[prev]! + snz[i]!
+        const L = Math.hypot(nx, nz) || 1
+        nx /= L
+        nz /= L
+        const miterScale = 1 / Math.max(nx * snx[i]! + nz * snz[i]!, 0.25)
+        offX[i] = sx[i]! + nx * THICKNESS * miterScale
+        offZ[i] = sz[i]! + nz * THICKNESS * miterScale
+      }
+
+      // 內側面：保留原本的 sharp / smooth 頂點分裂與法線平均邏輯，但法線取 -snx 朝向 passable，
+      // winding 反轉，使三角形正面朝玩家可見側，搭配 FrontSide 渲染。
+      const sInBot: number[] = new Array(n)
+      const eInBot: number[] = new Array(n)
       let cur = vbase
       for (let i = 0; i < n; i++) {
         const prev = (i - 1 + n) % n
         const dot = snx[prev]! * snx[i]! + snz[prev]! * snz[i]!
-        const x = sx[i]!, z = sz[i]!
+        const x = sx[i]!,
+          z = sz[i]!
         if (dot >= SHARP_DOT) {
-          // 平滑：單一共用頂點，法線取兩段平均並正規化。
           let nx = snx[prev]! + snx[i]!
           let nz = snz[prev]! + snz[i]!
           const L = Math.hypot(nx, nz) || 1
-          nx /= L; nz /= L
+          nx /= L
+          nz /= L
           positions.push(x, 0, z, x, wallHeight, z)
-          normals.push(nx, 0, nz, nx, 0, nz)
-          endBot[i] = cur
-          startBot[i] = cur
+          normals.push(-nx, 0, -nz, -nx, 0, -nz)
+          eInBot[i] = cur
+          sInBot[i] = cur
           cur += 2
         } else {
-          // 硬邊：兩組頂點位置相同、法線分別取自上一段與下一段。
           positions.push(x, 0, z, x, wallHeight, z)
-          normals.push(snx[prev]!, 0, snz[prev]!, snx[prev]!, 0, snz[prev]!)
-          endBot[i] = cur
+          normals.push(-snx[prev]!, 0, -snz[prev]!, -snx[prev]!, 0, -snz[prev]!)
+          eInBot[i] = cur
           cur += 2
           positions.push(x, 0, z, x, wallHeight, z)
-          normals.push(snx[i]!, 0, snz[i]!, snx[i]!, 0, snz[i]!)
-          startBot[i] = cur
+          normals.push(-snx[i]!, 0, -snz[i]!, -snx[i]!, 0, -snz[i]!)
+          sInBot[i] = cur
           cur += 2
         }
       }
       for (let i = 0; i < n; i++) {
         const j = (i + 1) % n
-        const a0 = startBot[i]!,   a1 = a0 + 1
-        const b0 = endBot[j]!,     b1 = b0 + 1
+        const a0 = sInBot[i]!,
+          a1 = a0 + 1
+        const b0 = eInBot[j]!,
+          b1 = b0 + 1
+        indices.push(a0, b1, b0, a0, a1, b1)
+      }
+
+      // 外側面：沿偏移輪廓建同樣的 sharp / smooth 牆面，法線朝 +snx；winding 與舊版一致。
+      // 玩家通常不會看到，但若 near plane 切進牆面、camera 仍在 passable 側，這層的封閉性
+      // 確保視線不會穿透到牆外背景。
+      const sOutBot: number[] = new Array(n)
+      const eOutBot: number[] = new Array(n)
+      for (let i = 0; i < n; i++) {
+        const prev = (i - 1 + n) % n
+        const dot = snx[prev]! * snx[i]! + snz[prev]! * snz[i]!
+        const x = offX[i]!,
+          z = offZ[i]!
+        if (dot >= SHARP_DOT) {
+          let nx = snx[prev]! + snx[i]!
+          let nz = snz[prev]! + snz[i]!
+          const L = Math.hypot(nx, nz) || 1
+          nx /= L
+          nz /= L
+          positions.push(x, 0, z, x, wallHeight, z)
+          normals.push(nx, 0, nz, nx, 0, nz)
+          eOutBot[i] = cur
+          sOutBot[i] = cur
+          cur += 2
+        } else {
+          positions.push(x, 0, z, x, wallHeight, z)
+          normals.push(snx[prev]!, 0, snz[prev]!, snx[prev]!, 0, snz[prev]!)
+          eOutBot[i] = cur
+          cur += 2
+          positions.push(x, 0, z, x, wallHeight, z)
+          normals.push(snx[i]!, 0, snz[i]!, snx[i]!, 0, snz[i]!)
+          sOutBot[i] = cur
+          cur += 2
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n
+        const a0 = sOutBot[i]!,
+          a1 = a0 + 1
+        const b0 = eOutBot[j]!,
+          b1 = b0 + 1
         indices.push(a0, b0, b1, a0, b1, a1)
       }
+
+      // 頂蓋：連接內外輪廓上緣以封閉立體。獨立頂點 + (0,1,0) 法線，與兩側牆面自然形成硬邊。
+      // 底面與地板共面 (y=0) 不會被看到，省略以節省幾何量。
+      const inTop: number[] = new Array(n)
+      const outTop: number[] = new Array(n)
+      for (let i = 0; i < n; i++) {
+        positions.push(sx[i]!, wallHeight, sz[i]!)
+        normals.push(0, 1, 0)
+        inTop[i] = cur++
+        positions.push(offX[i]!, wallHeight, offZ[i]!)
+        normals.push(0, 1, 0)
+        outTop[i] = cur++
+      }
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n
+        const ii = inTop[i]!,
+          oi = outTop[i]!
+        const ij = inTop[j]!,
+          oj = outTop[j]!
+        indices.push(ii, oi, oj, ii, oj, ij)
+      }
+
       vbase = cur
     }
     const wallGeo = new THREE.BufferGeometry()
     wallGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-    wallGeo.setAttribute('normal',   new THREE.Float32BufferAttribute(normals, 3))
+    wallGeo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
     wallGeo.setIndex(indices)
     const wallMat = new THREE.MeshStandardMaterial({
-      color: 0xf0f3f7, roughness: 0.6, metalness: 0.05,
-      side: THREE.DoubleSide,
+      color: 0xf0f3f7,
+      roughness: 0.6,
+      metalness: 0.05,
+      side: THREE.FrontSide,
     })
     mapGroup.add(new THREE.Mesh(wallGeo, wallMat))
   }
@@ -704,8 +930,11 @@ function buildPath() {
   const yLift = sceneCellSize * 0.3
   const radius = sceneCellSize * 0.45
   const tubeMat = new THREE.MeshStandardMaterial({
-    color: 0x00ffaa, emissive: 0x00ffaa, emissiveIntensity: 0.9,
-    roughness: 0.3, metalness: 0.2,
+    color: 0x00ffaa,
+    emissive: 0x00ffaa,
+    emissiveIntensity: 0.9,
+    roughness: 0.3,
+    metalness: 0.2,
   })
 
   // pathNodes 來自 centered → aligned → straightened 的降級。軸向 L 形輸出常產生小幅抖動，
@@ -738,10 +967,14 @@ function buildPath() {
 
   const markerGeo = new THREE.SphereGeometry(sceneCellSize * 0.9, 20, 20)
   const startMat = new THREE.MeshStandardMaterial({
-    color: 0x00ff66, emissive: 0x00ff66, emissiveIntensity: 0.8,
+    color: 0x00ff66,
+    emissive: 0x00ff66,
+    emissiveIntensity: 0.8,
   })
   const endMat = new THREE.MeshStandardMaterial({
-    color: 0xff4466, emissive: 0xff4466, emissiveIntensity: 0.8,
+    color: 0xff4466,
+    emissive: 0xff4466,
+    emissiveIntensity: 0.8,
   })
   const startMarker = new THREE.Mesh(markerGeo, startMat)
   startMarker.position.copy(points[0]!).setY(sceneCellSize * 0.9)
@@ -757,7 +990,9 @@ function buildAvatar() {
   const body = new THREE.Mesh(
     new THREE.ConeGeometry(r, r * 2.5, 16),
     new THREE.MeshStandardMaterial({
-      color: 0xffcc00, emissive: 0xffaa00, emissiveIntensity: 0.6,
+      color: 0xffcc00,
+      emissive: 0xffaa00,
+      emissiveIntensity: 0.6,
     }),
   )
   body.rotation.x = Math.PI / 2
@@ -770,8 +1005,13 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
   if (!collisionMask) return { x: px, y: py }
   const cx0 = Math.floor(px * pxToColl)
   const cy0 = Math.floor(py * pxToColl)
-  if (cx0 >= 0 && cx0 < collisionW && cy0 >= 0 && cy0 < collisionH
-      && collisionMask[cy0 * collisionW + cx0] === 1) {
+  if (
+    cx0 >= 0 &&
+    cx0 < collisionW &&
+    cy0 >= 0 &&
+    cy0 < collisionH &&
+    collisionMask[cy0 * collisionW + cx0] === 1
+  ) {
     return { x: px, y: py }
   }
   const seen = new Uint8Array(collisionW * collisionH)
@@ -783,12 +1023,17 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
     const idx = queue.shift()!
     const cx = idx % collisionW
     const cy = Math.floor(idx / collisionW)
-    if (cx >= 0 && cx < collisionW && cy >= 0 && cy < collisionH
-        && collisionMask[idx] === 1) {
+    if (cx >= 0 && cx < collisionW && cy >= 0 && cy < collisionH && collisionMask[idx] === 1) {
       return { x: (cx + 0.5) / pxToColl, y: (cy + 0.5) / pxToColl }
     }
-    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]] as const) {
-      const nx = cx + dx, ny = cy + dy
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const nx = cx + dx,
+        ny = cy + dy
       if (nx < 0 || nx >= collisionW || ny < 0 || ny >= collisionH) continue
       const ni = ny * collisionW + nx
       if (seen[ni]) continue
@@ -821,15 +1066,24 @@ function ensureUserState() {
 }
 
 function distPointToSegment(
-  px: number, py: number, ax: number, ay: number, bx: number, by: number,
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
 ): number {
-  const abx = bx - ax, aby = by - ay
-  const apx = px - ax, apy = py - ay
+  const abx = bx - ax,
+    aby = by - ay
+  const apx = px - ax,
+    apy = py - ay
   const abLen2 = abx * abx + aby * aby
   let t = abLen2 === 0 ? 0 : (apx * abx + apy * aby) / abLen2
   t = Math.max(0, Math.min(1, t))
-  const cx = ax + t * abx, cy = ay + t * aby
-  const dx = px - cx, dy = py - cy
+  const cx = ax + t * abx,
+    cy = ay + t * aby
+  const dx = px - cx,
+    dy = py - cy
   return Math.sqrt(dx * dx + dy * dy)
 }
 
@@ -838,9 +1092,7 @@ function minDistToPath(px: number, py: number): number {
   if (!nodes || nodes.length < 2) return Infinity
   let best = Infinity
   for (let i = 0; i < nodes.length - 1; i++) {
-    const d = distPointToSegment(
-      px, py, nodes[i]!.x, nodes[i]!.y, nodes[i+1]!.x, nodes[i+1]!.y,
-    )
+    const d = distPointToSegment(px, py, nodes[i]!.x, nodes[i]!.y, nodes[i + 1]!.x, nodes[i + 1]!.y)
     if (d < best) best = d
   }
   return best
@@ -870,11 +1122,18 @@ function tryMove(dtSec: number) {
       const ny = fy + dirY * subStep
       // 對角優先；若只有單軸通則沿該軸滑行並於本幀停住。
       if (isPassableAtPixel(nx, ny)) {
-        fx = nx; fy = ny
+        fx = nx
+        fy = ny
         continue
       }
-      if (isPassableAtPixel(nx, fy)) { fx = nx; break }
-      if (isPassableAtPixel(fx, ny)) { fy = ny; break }
+      if (isPassableAtPixel(nx, fy)) {
+        fx = nx
+        break
+      }
+      if (isPassableAtPixel(fx, ny)) {
+        fy = ny
+        break
+      }
       break
     }
     mapStore.userPosition = { x: fx, y: fy }
@@ -882,7 +1141,10 @@ function tryMove(dtSec: number) {
 }
 
 function updateOffPath() {
-  if (!mapStore.userPosition) { offPath.value = false; return }
+  if (!mapStore.userPosition) {
+    offPath.value = false
+    return
+  }
   const d = minDistToPath(mapStore.userPosition.x, mapStore.userPosition.y)
   offPath.value = d > OFF_PATH_THRESHOLD_PX
 }
@@ -954,21 +1216,46 @@ function onKey(down: boolean, e: KeyboardEvent) {
   if (viewMode.value !== 'first-person') return
   const v = down ? 1 : 0
   switch (e.key) {
-    case 'w': case 'W': case 'ArrowUp':    moveInput.fwd =  v; break
-    case 's': case 'S': case 'ArrowDown':  moveInput.fwd = -v; break
-    case 'a': case 'A': case 'ArrowLeft':  moveInput.rot = -v; break
-    case 'd': case 'D': case 'ArrowRight': moveInput.rot =  v; break
-    default: return
+    case 'w':
+    case 'W':
+    case 'ArrowUp':
+      moveInput.fwd = v
+      break
+    case 's':
+    case 'S':
+    case 'ArrowDown':
+      moveInput.fwd = -v
+      break
+    case 'a':
+    case 'A':
+    case 'ArrowLeft':
+      moveInput.rot = -v
+      break
+    case 'd':
+    case 'D':
+    case 'ArrowRight':
+      moveInput.rot = v
+      break
+    default:
+      return
   }
   e.preventDefault()
 }
 const onKeyDown = (e: KeyboardEvent) => onKey(true, e)
-const onKeyUp   = (e: KeyboardEvent) => onKey(false, e)
+const onKeyUp = (e: KeyboardEvent) => onKey(false, e)
 
-function holdFwd(v: number)   { moveInput.fwd = v }
-function holdRot(v: number)   { moveInput.rot = v }
-function releaseFwd()         { moveInput.fwd = 0 }
-function releaseRot()         { moveInput.rot = 0 }
+function holdFwd(v: number) {
+  moveInput.fwd = v
+}
+function holdRot(v: number) {
+  moveInput.rot = v
+}
+function releaseFwd() {
+  moveInput.fwd = 0
+}
+function releaseRot() {
+  moveInput.rot = 0
+}
 
 function resize() {
   if (!container.value || !renderer || !camera) return
@@ -1064,12 +1351,16 @@ onBeforeUnmount(() => {
         class="mode-btn"
         :class="{ active: viewMode === 'overview' }"
         @click="exitFirstPerson"
-      >俯瞰</button>
+      >
+        俯瞰
+      </button>
       <button
         class="mode-btn"
         :class="{ active: viewMode === 'first-person' }"
         @click="enterFirstPerson"
-      >第一人稱</button>
+      >
+        第一人稱
+      </button>
     </div>
 
     <div v-if="offPath && viewMode === 'first-person'" class="offpath-banner">
@@ -1085,28 +1376,36 @@ onBeforeUnmount(() => {
           @pointerup="releaseFwd"
           @pointerleave="releaseFwd"
           @pointercancel="releaseFwd"
-        >前進</button>
+        >
+          前進
+        </button>
         <button
           class="pad-btn left"
           @pointerdown.prevent="holdRot(-1)"
           @pointerup="releaseRot"
           @pointerleave="releaseRot"
           @pointercancel="releaseRot"
-        >左轉</button>
+        >
+          左轉
+        </button>
         <button
           class="pad-btn right"
           @pointerdown.prevent="holdRot(1)"
           @pointerup="releaseRot"
           @pointerleave="releaseRot"
           @pointercancel="releaseRot"
-        >右轉</button>
+        >
+          右轉
+        </button>
         <button
           class="pad-btn down"
           @pointerdown.prevent="holdFwd(-1)"
           @pointerup="releaseFwd"
           @pointerleave="releaseFwd"
           @pointercancel="releaseFwd"
-        >後退</button>
+        >
+          後退
+        </button>
       </div>
     </div>
   </div>
@@ -1210,9 +1509,24 @@ onBeforeUnmount(() => {
   cursor: pointer;
   touch-action: none;
 }
-.pad-btn:active { background: #00c8ff; color: #1a1a2e; }
-.pad-btn.up    { grid-column: 2; grid-row: 1; }
-.pad-btn.left  { grid-column: 1; grid-row: 2; }
-.pad-btn.right { grid-column: 3; grid-row: 2; }
-.pad-btn.down  { grid-column: 2; grid-row: 3; }
+.pad-btn:active {
+  background: #00c8ff;
+  color: #1a1a2e;
+}
+.pad-btn.up {
+  grid-column: 2;
+  grid-row: 1;
+}
+.pad-btn.left {
+  grid-column: 1;
+  grid-row: 2;
+}
+.pad-btn.right {
+  grid-column: 3;
+  grid-row: 2;
+}
+.pad-btn.down {
+  grid-column: 2;
+  grid-row: 3;
+}
 </style>
