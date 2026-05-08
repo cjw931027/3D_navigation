@@ -3,13 +3,13 @@ import { ref, toRaw } from 'vue'
 import { useMapStore } from '@/stores/mapStore'
 import type { MapMode } from '@/stores/mapStore'
 
-const mapStore    = useMapStore()
+const mapStore = useMapStore()
 const processTime = ref<number | null>(null)
-const isRunning   = ref(false)
+const isRunning = ref(false)
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
-const pathStatus    = ref<string | null>(null)
+const pathStatus = ref<string | null>(null)
 
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
@@ -32,26 +32,18 @@ const tooltips: Record<string, { problem: string; fix: string }> = {
 
 const paramLabels: Record<string, string> = {
   pathColorTolerance: '路色容差',
-  closingKernelSize:  '斷點填補',
-  wallThicken:        '牆壁加厚',
-  sampleRadius:       '採色半徑',
+  closingKernelSize: '斷點填補',
+  wallThicken: '牆壁加厚',
+  sampleRadius: '採色半徑',
 }
 
 const paramConfig: Record<string, { min: number; max: number; step: number }> = {
-  pathColorTolerance: { min: 5,  max: 80,  step: 1  },
-  closingKernelSize:  { min: 1,  max: 9,   step: 2  },
-  wallThicken:        { min: 0,  max: 5,   step: 1  },
-  sampleRadius:       { min: 3,  max: 18,  step: 1  },
+  pathColorTolerance: { min: 5, max: 80, step: 1 },
+  closingKernelSize: { min: 1, max: 9, step: 2 },
+  wallThicken: { min: 0, max: 5, step: 1 },
+  sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-const modeOptions: { value: MapMode; label: string; desc: string }[] = [
-  { value: 'indoor',  label: '室內', desc: '走廊、地鐵站、辦公室等有明確路徑顏色' },
-  { value: 'outdoor', label: '室外', desc: '院區、校園、停車場等戶外路面' },
-]
-
-function selectMode(mode: MapMode) {
-  mapStore.setMapMode(mode)
-}
 
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
@@ -63,9 +55,9 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
   for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
   ctx.strokeStyle = 'rgba(0,0,0,0.4)'
-  ctx.lineWidth   = 5
-  ctx.lineJoin    = 'round'
-  ctx.lineCap     = 'round'
+  ctx.lineWidth = 5
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
   ctx.stroke()
   ctx.restore()
 
@@ -73,13 +65,18 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
   for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
   ctx.strokeStyle = '#FFD600'
-  ctx.lineWidth   = 3
-  ctx.lineJoin    = 'round'
-  ctx.lineCap     = 'round'
+  ctx.lineWidth = 3
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
   ctx.stroke()
 }
 
-function drawDot(ctx: CanvasRenderingContext2D, point: { x: number; y: number }, color: string, label: string) {
+function drawDot(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  color: string,
+  label: string,
+) {
   ctx.beginPath()
   ctx.arc(point.x, point.y, 9, 0, Math.PI * 2)
   ctx.fillStyle = 'white'
@@ -89,20 +86,24 @@ function drawDot(ctx: CanvasRenderingContext2D, point: { x: number; y: number },
   ctx.fillStyle = color
   ctx.fill()
   ctx.fillStyle = color
-  ctx.font      = 'bold 13px sans-serif'
+  ctx.font = 'bold 13px sans-serif'
   ctx.fillText(label, point.x + 11, point.y - 5)
 }
 
 function drawOverlay(ctx: CanvasRenderingContext2D) {
   if (mapStore.pathNodes.length >= 2) drawPath(ctx)
   if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
-  if (mapStore.endPoint)   drawDot(ctx, mapStore.endPoint,   '#F44336', '終點')
+  if (mapStore.endPoint) drawDot(ctx, mapStore.endPoint, '#F44336', '終點')
 }
 
-function renderToCanvas(buffer: Uint8ClampedArray, width: number, height: number): CanvasRenderingContext2D | null {
+function renderToCanvas(
+  buffer: Uint8ClampedArray,
+  width: number,
+  height: number,
+): CanvasRenderingContext2D | null {
   const canvas = previewCanvas.value
   if (!canvas) return null
-  canvas.width  = width
+  canvas.width = width
   canvas.height = height
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
@@ -116,17 +117,17 @@ const runFloodFill = () => {
   if (!rawData || mapStore.mapWidth === 0) return alert('尚未載入地圖')
   if (!mapStore.seedPoint) return alert('缺少種子點，請回上傳頁重新標記')
 
-  const width  = mapStore.mapWidth
+  const width = mapStore.mapWidth
   const height = mapStore.mapHeight
-  const p      = mapStore.floodFillParams
-  const seed   = mapStore.seedPoint
-  const up     = mapStore.upscaleFactor
+  const p = mapStore.floodFillParams
+  const seed = mapStore.seedPoint
+  const up = mapStore.upscaleFactor
 
-  const W2 = width  * up
+  const W2 = width * up
   const H2 = height * up
   const size2 = W2 * H2 * 4
 
-  isRunning.value  = true
+  isRunning.value = true
   pathStatus.value = null
 
   try {
@@ -143,8 +144,8 @@ const runFloodFill = () => {
         for (let x = 0; x < W2; x++) {
           const sx = (x / up) | 0
           const si = (sy * width + sx) * 4
-          const di = (y  * W2    + x ) * 4
-          sendData[di]     = rawData[si]!
+          const di = (y * W2 + x) * 4
+          sendData[di] = rawData[si]!
           sendData[di + 1] = rawData[si + 1]!
           sendData[di + 2] = rawData[si + 2]!
           sendData[di + 3] = rawData[si + 3]!
@@ -156,26 +157,28 @@ const runFloodFill = () => {
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
     // mode: 0 = 色塊圖 RGB，1 = 線稿圖 HSL。
-    const modeInt      = mapStore.mapType === 'line-art' ? 1 : 0
-    const normInt      = 0
-    const denoiseArea  = mapStore.denoiseMinArea * up * up
+    const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
+    const normInt = 0
+    const denoiseArea = mapStore.denoiseMinArea * up * up
     mapStore.wasmModule.intelligentFloodFill(
-      W2, H2,
-      Math.round(seed.x * up), Math.round(seed.y * up),
+      W2,
+      H2,
+      Math.round(seed.x * up),
+      Math.round(seed.y * up),
       p.pathColorTolerance,
       p.closingKernelSize,
       p.wallThicken,
       p.sampleRadius,
       modeInt,
       normInt,
-      denoiseArea
+      denoiseArea,
     )
 
     // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
     const resultUp = new Uint8ClampedArray(size2)
-    resultUp.set(new Uint8ClampedArray(
-      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size2
-    ))
+    resultUp.set(
+      new Uint8ClampedArray(mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, pointer, size2),
+    )
 
     let displayBuffer: Uint8ClampedArray
     if (up === 1) {
@@ -187,8 +190,8 @@ const runFloodFill = () => {
           const sx = x * up
           const sy = y * up
           const si = (sy * W2 + sx) * 4
-          const di = (y  * width + x) * 4
-          displayBuffer[di]     = resultUp[si]!
+          const di = (y * width + x) * 4
+          displayBuffer[di] = resultUp[si]!
           displayBuffer[di + 1] = resultUp[si + 1]!
           displayBuffer[di + 2] = resultUp[si + 2]!
           displayBuffer[di + 3] = resultUp[si + 3]!
@@ -197,12 +200,14 @@ const runFloodFill = () => {
     }
     mapStore.floodFillResultData = displayBuffer
 
-    const maskPtr  = mapStore.wasmModule.getPassableMaskBuffer() as number
-    const maskLen  = mapStore.wasmModule.getPassableMaskSize()   as number
-    const maskW    = mapStore.wasmModule.getPassableMaskWidth()  as number
-    const maskH    = mapStore.wasmModule.getPassableMaskHeight() as number
+    const maskPtr = mapStore.wasmModule.getPassableMaskBuffer() as number
+    const maskLen = mapStore.wasmModule.getPassableMaskSize() as number
+    const maskW = mapStore.wasmModule.getPassableMaskWidth() as number
+    const maskH = mapStore.wasmModule.getPassableMaskHeight() as number
     const maskCopy = new Uint8Array(
-      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer, maskPtr, maskLen
+      mapStore.wasmModule.HEAPU8.buffer as ArrayBuffer,
+      maskPtr,
+      maskLen,
     ).slice()
     mapStore.setPassableMask(maskCopy, maskW, maskH)
 
@@ -223,7 +228,6 @@ const runFloodFill = () => {
     } else if (mapStore.startPoint && mapStore.endPoint) {
       pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
-
   } catch (err) {
     console.error('runFloodFill 失敗:', err)
     pathStatus.value = '運算發生錯誤，請查看 console'
@@ -237,17 +241,13 @@ const runAStarOnly = () => {
   if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
   if (!mapStore.floodFillResultData) return alert('請先執行一次路徑識別，再使用重算路徑')
 
-  isRunning.value  = true
+  isRunning.value = true
   pathStatus.value = null
 
   try {
     const nodeCount = mapStore.runAStar()
 
-    const ctx = renderToCanvas(
-      mapStore.floodFillResultData,
-      mapStore.mapWidth,
-      mapStore.mapHeight
-    )
+    const ctx = renderToCanvas(mapStore.floodFillResultData, mapStore.mapWidth, mapStore.mapHeight)
     if (ctx) drawOverlay(ctx)
 
     if (nodeCount > 0) {
@@ -255,7 +255,6 @@ const runAStarOnly = () => {
     } else {
       pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
-
   } catch (err) {
     console.error('runAStarOnly 失敗:', err)
     pathStatus.value = '運算發生錯誤，請查看 console'
@@ -277,35 +276,24 @@ const runAStarOnly = () => {
 
     <template v-else>
       <div class="panel">
-
         <!-- 路色預覽 -->
         <div class="color-row">
           <div class="color-chip" v-if="mapStore.pathColor">
-            <span class="swatch" :style="{
-              background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`
-            }"></span>
-            路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }}, {{ mapStore.pathColor.b }})
+            <span
+              class="swatch"
+              :style="{
+                background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
+              }"
+            ></span>
+            路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
+            {{ mapStore.pathColor.b }})
           </div>
           <div class="color-chip muted" v-else>路色未採樣</div>
         </div>
 
-        <!-- 地圖類型 -->
-        <div class="section-label">地圖類型</div>
-        <div class="mode-row">
-          <button
-            v-for="opt in modeOptions"
-            :key="opt.value"
-            class="mode-btn"
-            :class="{ active: mapStore.mapMode === opt.value }"
-            @click="selectMode(opt.value)"
-          >
-            {{ opt.label }}
-            <span class="mode-desc">{{ opt.desc }}</span>
-          </button>
-        </div>
 
         <!-- 靈敏度 -->
-        <div class="section-label" style="margin-top:20px">
+        <div class="section-label" style="margin-top: 20px">
           辨識靈敏度
           <span class="sens-badge">{{ mapStore.sensitivity }}</span>
         </div>
@@ -318,15 +306,19 @@ const runAStarOnly = () => {
                 type="range"
                 :value="mapStore.sensitivity"
                 @input="mapStore.setSensitivity(Number(($event.target as HTMLInputElement).value))"
-                min="1" max="10" step="1"
+                min="1"
+                max="10"
+                step="1"
                 class="sensitivity-slider"
               />
               <div class="tick-row">
                 <span
-                  v-for="n in 10" :key="n"
+                  v-for="n in 10"
+                  :key="n"
                   class="tick"
                   :class="{ active: mapStore.sensitivity === n }"
-                >{{ n }}</span>
+                  >{{ n }}</span
+                >
               </div>
             </div>
             <span class="sens-end-label">寬鬆</span>
@@ -338,17 +330,14 @@ const runAStarOnly = () => {
         </div>
 
         <!-- 進階參數（折疊） -->
-        <div
-          class="advanced-toggle"
-          @click="mapStore.showAdvanced = !mapStore.showAdvanced"
-        >
+        <div class="advanced-toggle" @click="mapStore.showAdvanced = !mapStore.showAdvanced">
           進階參數
           <span class="toggle-arrow">{{ mapStore.showAdvanced ? '▲' : '▼' }}</span>
         </div>
 
         <div class="advanced-panel" v-if="mapStore.showAdvanced">
           <div
-            v-for="key in (Object.keys(paramLabels) as (keyof typeof paramLabels)[])"
+            v-for="key in Object.keys(paramLabels) as (keyof typeof paramLabels)[]"
             :key="key"
             class="param-row"
           >
@@ -360,20 +349,25 @@ const runAStarOnly = () => {
                   @mouseenter="activeTooltip = key"
                   @mouseleave="activeTooltip = null"
                   @touchstart.prevent="activeTooltip = activeTooltip === key ? null : key"
-                >?</span>
+                  >?</span
+                >
                 <div class="tooltip-box" v-if="activeTooltip === key">
                   <p><strong>什麼情況調整：</strong>{{ tooltips[key]!.problem }}</p>
                   <p><strong>如何調整：</strong>{{ tooltips[key]!.fix }}</p>
                 </div>
               </span>
-              <strong>{{ mapStore.floodFillParams[key as keyof typeof mapStore.floodFillParams] }}</strong>
+              <strong>{{
+                mapStore.floodFillParams[key as keyof typeof mapStore.floodFillParams]
+              }}</strong>
             </div>
             <input
               type="range"
               :value="mapStore.floodFillParams[key as keyof typeof mapStore.floodFillParams]"
-              @input="mapStore.setFloodFillParams({
-                [key]: Number(($event.target as HTMLInputElement).value)
-              })"
+              @input="
+                mapStore.setFloodFillParams({
+                  [key]: Number(($event.target as HTMLInputElement).value),
+                })
+              "
               :min="paramConfig[key]!.min"
               :max="paramConfig[key]!.max"
               :step="paramConfig[key]!.step"
@@ -392,9 +386,13 @@ const runAStarOnly = () => {
                 type="range"
                 :value="mapStore.denoiseMinArea"
                 @input="mapStore.denoiseMinArea = Number(($event.target as HTMLInputElement).value)"
-                min="0" max="400" step="10"
+                min="0"
+                max="400"
+                step="10"
               />
-              <span class="toggle-hint">BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉</span>
+              <span class="toggle-hint"
+                >BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉</span
+              >
             </div>
           </div>
         </div>
@@ -411,9 +409,13 @@ const runAStarOnly = () => {
           <button
             class="btn-astar"
             @click="runAStarOnly"
-            :disabled="!mapStore.isEngineReady || isRunning
-                       || !mapStore.startPoint || !mapStore.endPoint
-                       || !mapStore.floodFillResultData"
+            :disabled="
+              !mapStore.isEngineReady ||
+              isRunning ||
+              !mapStore.startPoint ||
+              !mapStore.endPoint ||
+              !mapStore.floodFillResultData
+            "
             title="保留目前識別結果，重新計算起訖點之間的最短路徑"
           >
             重算路徑
@@ -439,7 +441,6 @@ const runAStarOnly = () => {
         <canvas ref="previewCanvas"></canvas>
       </div>
     </template>
-
   </main>
 </template>
 
@@ -468,7 +469,10 @@ h1 {
   color: #6d4c00;
   font-size: 0.92em;
 }
-.warn-panel a { color: #1565c0; font-weight: 600; }
+.warn-panel a {
+  color: #1565c0;
+  font-weight: 600;
+}
 
 .panel {
   margin: 0 auto 20px;
@@ -480,7 +484,10 @@ h1 {
   text-align: left;
 }
 
-.color-row { display: flex; margin-bottom: 18px; }
+.color-row {
+  display: flex;
+  margin-bottom: 18px;
+}
 
 .color-chip {
   display: inline-flex;
@@ -493,11 +500,14 @@ h1 {
   border-radius: 20px;
   padding: 4px 12px;
 }
-.color-chip.muted { color: #aaa; }
+.color-chip.muted {
+  color: #aaa;
+}
 
 .swatch {
   display: inline-block;
-  width: 14px; height: 14px;
+  width: 14px;
+  height: 14px;
   border-radius: 3px;
   border: 1px solid #aaa;
   flex-shrink: 0;
@@ -515,38 +525,6 @@ h1 {
   gap: 8px;
 }
 
-.mode-row { display: flex; gap: 10px; }
-
-.mode-btn {
-  flex: 1;
-  padding: 10px 14px;
-  border: 2px solid #ddd;
-  border-radius: 8px;
-  background: white;
-  cursor: pointer;
-  text-align: left;
-  font-size: 0.9em;
-  font-weight: 700;
-  color: #444;
-  transition: border-color 0.15s, background 0.15s;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  touch-action: manipulation;
-}
-.mode-btn.active {
-  border-color: #1565c0;
-  background: #e3f2fd;
-  color: #1565c0;
-}
-.mode-desc {
-  font-size: 0.74em;
-  font-weight: 400;
-  color: #999;
-  line-height: 1.4;
-}
-.mode-btn.active .mode-desc { color: #5c8fc7; }
-
 .sens-badge {
   background: #1565c0;
   color: white;
@@ -559,7 +537,9 @@ h1 {
   text-align: center;
 }
 
-.sensitivity-wrap { margin-bottom: 4px; }
+.sensitivity-wrap {
+  margin-bottom: 4px;
+}
 
 .sensitivity-row {
   display: flex;
@@ -600,7 +580,9 @@ h1 {
   width: 18px;
   text-align: center;
   line-height: 1;
-  transition: color 0.15s, font-weight 0.15s;
+  transition:
+    color 0.15s,
+    font-weight 0.15s;
 }
 
 .tick.active {
@@ -634,11 +616,18 @@ h1 {
   user-select: none;
   touch-action: manipulation;
 }
-.toggle-arrow { font-size: 0.85em; }
+.toggle-arrow {
+  font-size: 0.85em;
+}
 
-.advanced-panel { padding-top: 8px; margin-bottom: 14px; }
+.advanced-panel {
+  padding-top: 8px;
+  margin-bottom: 14px;
+}
 
-.param-row { margin-bottom: 14px; }
+.param-row {
+  margin-bottom: 14px;
+}
 
 .param-label {
   display: flex;
@@ -666,7 +655,7 @@ h1 {
   text-align: center;
 }
 
-.param-row input[type="range"] {
+.param-row input[type='range'] {
   width: 100%;
   cursor: pointer;
   accent-color: #1565c0;
@@ -676,7 +665,8 @@ h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px; height: 16px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #e0e0e0;
   color: #666;
@@ -700,11 +690,15 @@ h1 {
   border-radius: 7px;
   width: 260px;
   line-height: 1.55;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
   pointer-events: none;
 }
-.tooltip-box p { margin: 0 0 5px; }
-.tooltip-box p:last-child { margin: 0; }
+.tooltip-box p {
+  margin: 0 0 5px;
+}
+.tooltip-box p:last-child {
+  margin: 0;
+}
 
 .btn-row {
   display: flex;
@@ -725,8 +719,13 @@ h1 {
   transition: background 0.2s;
   touch-action: manipulation;
 }
-.btn-run:hover:not(:disabled) { background: #0097a7; }
-.btn-run:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-run:hover:not(:disabled) {
+  background: #0097a7;
+}
+.btn-run:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 .btn-astar {
   padding: 12px 16px;
@@ -741,8 +740,13 @@ h1 {
   touch-action: manipulation;
   white-space: nowrap;
 }
-.btn-astar:hover:not(:disabled) { background: #0d47a1; }
-.btn-astar:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-astar:hover:not(:disabled) {
+  background: #0d47a1;
+}
+.btn-astar:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 .result-row {
   display: flex;
@@ -754,23 +758,29 @@ h1 {
   flex-wrap: wrap;
 }
 
-.result-time { color: #006064; }
+.result-time {
+  color: #006064;
+}
 
 .result-path {
   color: #1565c0;
   font-weight: 500;
 }
 
-.result-path.error { color: #c62828; }
+.result-path.error {
+  color: #c62828;
+}
 
-.canvas-container { margin-top: 16px; }
+.canvas-container {
+  margin-top: 16px;
+}
 
 canvas {
   max-width: 100%;
   border: 1px solid #ddd;
   border-radius: 8px;
   background: white;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 /* 前處理區 */
@@ -808,7 +818,7 @@ canvas {
 }
 
 /* 隱藏原生 checkbox */
-.toggle-label input[type="checkbox"] {
+.toggle-label input[type='checkbox'] {
   position: absolute;
   opacity: 0;
   width: 0;
@@ -839,7 +849,7 @@ canvas {
   background: white;
   border-radius: 50%;
   transition: transform 0.2s;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .toggle-label input:checked + .toggle-track .toggle-thumb {
