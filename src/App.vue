@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RouterView, RouterLink } from 'vue-router'
-import { onMounted } from 'vue'                
+import { onMounted } from 'vue'
 import { useMapStore } from '@/stores/mapStore'
 
 const mapStore = useMapStore()
@@ -35,7 +35,7 @@ body {
   background-color: #1a1a2e;
   padding: 15px;
   text-align: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .nav-btn {
