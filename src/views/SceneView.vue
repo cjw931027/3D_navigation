@@ -1420,9 +1420,9 @@ onBeforeUnmount(() => {
 .scene-canvas {
   width: 100%;
   height: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
-  background: #1a1a2e;
+  background: var(--color-text);
 }
 .scene-canvas :deep(canvas) {
   display: block;
@@ -1434,11 +1434,11 @@ onBeforeUnmount(() => {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 10px 16px;
-  background: rgba(22, 33, 62, 0.85);
-  color: #e0e0e0;
-  border-radius: 6px;
-  font-size: 14px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-scene-panel);
+  color: var(--color-scene-text);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
   pointer-events: none;
 }
 
@@ -1450,18 +1450,18 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .mode-btn {
-  padding: 8px 14px;
+  padding: var(--space-2) var(--space-4);
   border: none;
-  border-radius: 6px;
-  background: rgba(22, 33, 62, 0.85);
-  color: #e0e0e0;
+  border-radius: var(--radius-md);
+  background: var(--color-scene-panel);
+  color: var(--color-scene-text);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 .mode-btn.active {
-  background: #00c8ff;
-  color: #1a1a2e;
-  font-weight: bold;
+  background: var(--color-scene-accent);
+  color: var(--color-text);
+  font-weight: var(--font-bold);
 }
 
 .offpath-banner {
@@ -1469,23 +1469,23 @@ onBeforeUnmount(() => {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 10px 16px;
-  background: rgba(180, 40, 60, 0.9);
-  color: #fff;
-  border-radius: 6px;
-  font-size: 14px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-scene-warning);
+  color: var(--color-white);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
   display: flex;
   align-items: center;
   gap: 10px;
 }
 .replan-btn {
-  padding: 6px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
-  border-radius: 4px;
-  background: #fff;
-  color: #b4283c;
+  border-radius: var(--radius-sm);
+  background: var(--color-white);
+  color: var(--color-scene-warning-text);
   cursor: pointer;
-  font-weight: bold;
+  font-weight: var(--font-bold);
 }
 
 .controls {
@@ -1502,16 +1502,16 @@ onBeforeUnmount(() => {
 }
 .pad-btn {
   border: none;
-  border-radius: 10px;
-  background: rgba(22, 33, 62, 0.85);
-  color: #e0e0e0;
-  font-size: 14px;
+  border-radius: var(--radius-md);
+  background: var(--color-scene-panel);
+  color: var(--color-scene-text);
+  font-size: var(--text-base);
   cursor: pointer;
   touch-action: none;
 }
 .pad-btn:active {
-  background: #00c8ff;
-  color: #1a1a2e;
+  background: var(--color-scene-accent);
+  color: var(--color-text);
 }
 .pad-btn.up {
   grid-column: 2;
