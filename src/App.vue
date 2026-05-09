@@ -4,6 +4,7 @@ import { RouterView, useRoute, useRouter } from 'vue-router'
 import { Box, Check, Lock, Route as RouteIcon, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 
+// 頂部流程條的資料來源，狀態由 mapStore 內的實際地圖與路徑結果推導。
 interface StepItem {
   id: number
   title: string
@@ -17,14 +18,17 @@ const route = useRoute()
 const router = useRouter()
 const mapStore = useMapStore()
 
+// 上傳完成代表已經有原始影像，且使用者已標出起點與終點。
 const isUploadComplete = computed(
   () => mapStore.imageRawData != null && mapStore.startPoint != null && mapStore.endPoint != null,
 )
 
+// 路徑識別完成代表 WASM 已產生可通行遮罩，且 A* 有輸出路徑節點。
 const isPathComplete = computed(
   () => mapStore.passableMask != null && mapStore.pathNodes.length > 0,
 )
 
+// 三個步驟以資料驅動畫面，之後若路由或門檻調整只需要改這份設定。
 const steps = computed<StepItem[]>(() => [
   {
     id: 1,
@@ -56,6 +60,7 @@ function isActiveStep(step: StepItem) {
   return route.path === step.path
 }
 
+// 狀態優先序會影響圖示與顏色；完成 > 當前頁 > 可用 > 鎖定。
 function getStepState(step: StepItem) {
   if (step.isComplete) return 'complete'
   if (isActiveStep(step)) return 'active'
@@ -63,18 +68,21 @@ function getStepState(step: StepItem) {
   return 'locked'
 }
 
+// 鎖定步驟只呈現狀態，不執行路由切換。
 function handleStepClick(step: StepItem) {
   if (!step.isAvailable || isActiveStep(step)) return
   router.push(step.path)
 }
 
 onMounted(() => {
+  // WASM 引擎只在根元件初始化一次，後續頁面共用同一個 mapStore 狀態。
   mapStore.initEngine()
 })
 </script>
 
 <template>
   <div class="app-container">
+    <!-- 根導覽列只顯示流程狀態，實際能否進入下一步由 mapStore 的資料完整度決定。 -->
     <nav class="navbar" aria-label="流程導覽">
       <div class="stepper">
         <template v-for="(step, index) in steps" :key="step.id">
@@ -108,6 +116,7 @@ onMounted(() => {
       </div>
     </nav>
 
+    <!-- 子頁面共用同一個 Pinia store，因此切換頁面不會遺失地圖、遮罩與路徑。 -->
     <main class="content">
       <RouterView />
     </main>
