@@ -32,7 +32,7 @@ void freeMemory() {
     }
 }
 
-// 計算兩個RGB顏色的差異程度，歐幾里得距離
+// 計算兩個RGB顏色的差異程度，歐幾里得距離平方，省略開根號
 inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
                         uint8_t r2, uint8_t g2, uint8_t b2) {
     int dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
@@ -61,7 +61,7 @@ HSL rgbtohsl(uint8_t r8, uint8_t g8, uint8_t b8) {
     return { h, s, l };
 }
 
-// 計算兩個HSL顏色的差異度
+// 計算兩個HSL顏色的差異度，當平均飽和度極低 (satAvg < 0.12f) 時，視為黑白/灰階線稿圖。
 float hslDist(HSL a, HSL b) {
     float dL = a.l - b.l;
     float dS = a.s - b.s;
