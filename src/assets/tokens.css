@@ -2,10 +2,11 @@
   /* Brand */
   --color-primary: #1565c0;
   --color-primary-hover: #0d47a1;
+  --color-primary-ring: rgba(21, 101, 192, 0.16);
   --color-accent: #00bcd4;
   --color-accent-hover: #0097a7;
-  --color-success: #4CAF50;
-  --color-danger: #F44336;
+  --color-success: #4caf50;
+  --color-danger: #f44336;
   --color-danger-dark: #c62828;
   --color-white: #ffffff;
 
