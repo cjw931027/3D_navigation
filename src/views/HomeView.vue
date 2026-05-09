@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, toRaw } from 'vue'
+import { ImageOff, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 import type { MapMode } from '@/stores/mapStore'
 
@@ -43,7 +44,6 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   wallThicken: { min: 0, max: 5, step: 1 },
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
-
 
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
@@ -268,10 +268,19 @@ const runAStarOnly = () => {
   <main class="home-container">
     <h1>路徑識別</h1>
 
-    <div class="warn-panel" v-if="mapStore.mapWidth === 0">
-      尚未載入地圖，請先前往
-      <router-link to="/upload">上傳地圖</router-link>
-      並完成標記。
+    <div class="empty-state" v-if="mapStore.mapWidth === 0">
+      <div class="empty-icon">
+        <ImageOff :size="48" :stroke-width="1.5" />
+      </div>
+      <h2 class="empty-title">還沒有載入地圖</h2>
+      <p class="empty-desc">
+        請先上傳室內平面圖並標記起點與終點，<br />
+        系統才能識別可通行路徑。
+      </p>
+      <RouterLink to="/upload" class="empty-action">
+        <Upload :size="16" />
+        前往上傳地圖
+      </RouterLink>
     </div>
 
     <template v-else>
@@ -290,7 +299,6 @@ const runAStarOnly = () => {
           </div>
           <div class="color-chip muted" v-else>路色未採樣</div>
         </div>
-
 
         <!-- 靈敏度 -->
         <div class="section-label" style="margin-top: 20px">
@@ -459,19 +467,57 @@ h1 {
   margin-bottom: var(--space-5);
 }
 
-.warn-panel {
-  margin: var(--space-10) auto;
-  max-width: 480px;
-  padding: var(--space-5);
-  background: var(--color-warn-bg);
-  border: 1px solid var(--color-warn-border);
-  border-radius: var(--radius-md);
-  color: var(--color-warn-text);
-  font-size: var(--text-base);
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 400px;
+  margin: 0 auto;
+  padding: var(--space-10) var(--space-5);
 }
-.warn-panel a {
-  color: var(--color-primary);
+
+.empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  border-radius: var(--radius-circle);
+  background: var(--color-bg-soft);
+  color: var(--color-text-muted);
+}
+
+.empty-title {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--color-text);
+  font-size: 18px;
   font-weight: var(--font-semibold);
+}
+
+.empty-desc {
+  margin: 0 0 var(--space-5);
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-primary);
+  color: var(--color-white);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+
+.empty-action:hover {
+  background: var(--color-primary-hover);
 }
 
 .panel {
