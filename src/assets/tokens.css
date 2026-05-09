@@ -1,0 +1,96 @@
+:root {
+  /* Brand */
+  --color-primary: #1565c0;
+  --color-primary-hover: #0d47a1;
+  --color-accent: #00bcd4;
+  --color-accent-hover: #0097a7;
+  --color-success: #4CAF50;
+  --color-danger: #F44336;
+  --color-danger-dark: #c62828;
+  --color-white: #ffffff;
+
+  /* Text */
+  --color-text: #1a1a2e;
+  --color-text-secondary: #333;
+  --color-text-tertiary: #444;
+  --color-text-soft: #555;
+  --color-text-disabled: #666;
+  --color-text-muted: #888;
+  --color-text-faded: #999;
+  --color-text-placeholder: #aaa;
+  --color-text-hint: #bbb;
+  --color-text-tick: #ccc;
+
+  /* Surfaces / borders */
+  --color-bg-card: #f8f9ff;
+  --color-bg-soft: #f5f5f5;
+  --color-bg-hover: #f0f0f0;
+  --color-bg-neutral: #eee;
+  --color-bg-chip: #e0e0e0;
+  --color-border: #ddd;
+  --color-border-light: #e8e8e8;
+
+  /* Status panels */
+  --color-warn-bg: #fff8e1;
+  --color-warn-border: #ffe082;
+  --color-warn-text: #6d4c00;
+  --color-info-bg: #e3f2fd;
+  --color-info-text: #006064;
+  --color-success-bg: #e8f5e9;
+  --color-success-text: #2e7d32;
+
+  /* Map-type badge (line art) */
+  --color-badge-line-bg: #f3e5f5;
+  --color-badge-line-text: #6a1b9a;
+
+  /* Map-type override warning */
+  --color-override-text: #e65100;
+  --color-override-bg: #fff3e0;
+
+  /* Scene (3D) dark theme */
+  --color-scene-panel: rgba(22, 33, 62, 0.85);
+  --color-scene-text: #e0e0e0;
+  --color-scene-accent: #00c8ff;
+  --color-scene-warning: rgba(180, 40, 60, 0.9);
+  --color-scene-warning-text: #b4283c;
+
+  /* Overlays */
+  --color-overlay: rgba(0, 0, 0, 0.5);
+
+  /* Typography — font size */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-h2: 22px;
+  --text-h1: 26px;
+
+  /* Typography — font weight */
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+  --radius-circle: 50%;
+
+  /* Shadows */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.25);
+  --shadow-magnifier: 0 2px 10px rgba(0, 0, 0, 0.3);
+  --shadow-thumb: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
