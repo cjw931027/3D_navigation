@@ -37,7 +37,7 @@ const steps = computed<StepItem[]>(() => [
   {
     id: 2,
     title: '路徑識別',
-    path: '/',
+    path: '/path',
     icon: RouteIcon,
     isAvailable: isUploadComplete.value,
     isComplete: isPathComplete.value,

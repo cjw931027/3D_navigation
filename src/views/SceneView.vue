@@ -1342,8 +1342,13 @@ onBeforeUnmount(() => {
   <div class="scene-view">
     <div ref="container" class="scene-canvas" />
 
-    <div v-if="!hasMask" class="hint">
-      尚未產生可通行遮罩，請先到「首頁」上傳地圖並執行一次路徑識別。
+    <div v-if="!hasMask" class="hint">尚未產生可通行遮罩，請先上傳地圖並執行一次路徑識別。</div>
+
+    <div class="scene-flow-actions">
+      <RouterLink to="/path" class="scene-flow-btn">上一步：路徑識別</RouterLink>
+      <RouterLink to="/upload" class="scene-flow-btn scene-flow-btn--primary">
+        回到第一步：上傳地圖
+      </RouterLink>
     </div>
 
     <div v-if="hasMask" class="top-bar">
@@ -1440,6 +1445,43 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-md);
   font-size: var(--text-base);
   pointer-events: none;
+}
+
+.scene-flow-actions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.scene-flow-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-md);
+  background: var(--color-scene-panel);
+  color: var(--color-scene-text);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.scene-flow-btn:hover {
+  background: var(--color-primary-hover);
+  color: var(--color-white);
+}
+
+.scene-flow-btn--primary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-white);
 }
 
 .top-bar {

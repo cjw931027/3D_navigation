@@ -436,7 +436,7 @@ function resetZoom() {
   translateY.value = 0
 }
 
-const goToProcess = () => router.push('/')
+const goToProcess = () => router.push('/path')
 </script>
 
 <template>
@@ -536,7 +536,7 @@ const goToProcess = () => router.push('/')
 
     <!-- 完成後 -->
     <div v-if="selectionStep === 4" class="next-section">
-      <button class="btn-primary" @click="goToProcess">執行路徑識別</button>
+      <button class="btn-primary" @click="goToProcess">下一步：路徑識別</button>
     </div>
   </main>
 </template>
