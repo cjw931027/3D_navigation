@@ -130,10 +130,12 @@ body {
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei',
     'Helvetica Neue', Arial, sans-serif;
   background-color: var(--color-bg-soft);
+  overflow-x: hidden;
 }
 
 .app-container {
   min-height: 100vh;
+  overflow-x: hidden;
 }
 
 .navbar {
@@ -243,5 +245,54 @@ body {
 
 .content {
   padding: var(--space-4);
+}
+
+@media (max-width: 720px) {
+  .navbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding: var(--space-4) var(--space-3);
+  }
+
+  .stepper {
+    max-width: 100%;
+  }
+
+  .step-button {
+    min-width: 68px;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+  }
+
+  .step-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .step-line {
+    flex-basis: 28px;
+    min-width: 20px;
+    margin: 0 var(--space-1);
+  }
+
+  .content {
+    padding: var(--space-3);
+  }
+}
+
+@media (max-width: 380px) {
+  .step-button {
+    min-width: 60px;
+  }
+
+  .step-title {
+    font-size: 11px;
+  }
+
+  .step-line {
+    flex-basis: 16px;
+    min-width: 12px;
+  }
 }
 </style>
