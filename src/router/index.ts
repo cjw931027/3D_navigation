@@ -8,6 +8,10 @@ const router = createRouter({
   routes: [
     {
       path: '/',
+      redirect: '/upload',
+    },
+    {
+      path: '/path',
       name: 'home',
       component: HomeView,
     },

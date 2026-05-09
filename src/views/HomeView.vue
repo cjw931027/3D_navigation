@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, toRaw } from 'vue'
+import { computed, ref, toRaw } from 'vue'
 import { ImageOff, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 import type { MapMode } from '@/stores/mapStore'
@@ -11,6 +11,7 @@ const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
 const pathStatus = ref<string | null>(null)
+const canGoToScene = computed(() => mapStore.passableMask != null && mapStore.pathNodes.length > 0)
 
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
@@ -448,6 +449,16 @@ const runAStarOnly = () => {
       <div class="canvas-container">
         <canvas ref="previewCanvas"></canvas>
       </div>
+
+      <div class="flow-actions">
+        <RouterLink to="/upload" class="flow-btn flow-btn--secondary">上一步：上傳地圖</RouterLink>
+        <RouterLink v-if="canGoToScene" to="/scene" class="flow-btn flow-btn--primary">
+          下一步：3D 場景
+        </RouterLink>
+        <button v-else class="flow-btn flow-btn--primary" type="button" disabled>
+          下一步：3D 場景
+        </button>
+      </div>
     </template>
   </main>
 </template>
@@ -827,6 +838,57 @@ canvas {
   border-radius: var(--radius-md);
   background: white;
   box-shadow: var(--shadow-sm);
+}
+
+.flow-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-5);
+}
+
+.flow-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.flow-btn--primary {
+  background: var(--color-primary);
+  color: var(--color-white);
+}
+
+.flow-btn--primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.flow-btn--secondary {
+  background: var(--color-white);
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.flow-btn--secondary:hover {
+  background: var(--color-bg-hover);
+}
+
+.flow-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* 前處理區 */
