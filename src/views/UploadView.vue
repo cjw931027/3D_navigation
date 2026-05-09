@@ -867,21 +867,6 @@ canvas {
   font-weight: var(--font-medium);
 }
 
-@media (max-width: 640px) {
-  .upload-card {
-    grid-template-columns: auto 1fr;
-  }
-
-  .upload-file-button {
-    grid-column: 1 / -1;
-    width: 100%;
-  }
-
-  .canvas-wrapper {
-    min-height: 240px;
-  }
-}
-
 /* 放大鏡 */
 :global(.magnifier) {
   position: fixed;
@@ -1061,5 +1046,160 @@ canvas {
 
 .btn-reset-type:hover {
   background: var(--color-override-bg);
+}
+
+@media (max-width: 640px) {
+  .upload-container {
+    padding: var(--space-4) var(--space-2);
+  }
+
+  h2 {
+    margin-bottom: var(--space-1);
+  }
+
+  .status {
+    margin-bottom: var(--space-2);
+  }
+
+  .steps-bar {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+    gap: var(--space-1);
+    scrollbar-width: none;
+  }
+
+  .steps-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .step {
+    flex: 0 0 auto;
+    padding: 2px var(--space-2);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .step-sep {
+    flex-shrink: 0;
+  }
+
+  .action-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .btn-group {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-2);
+  }
+
+  .btn-type {
+    min-height: 40px;
+  }
+
+  .btn-sm {
+    min-height: 36px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .step-msg {
+    line-height: 1.45;
+  }
+
+  .action-bar:has(.btn-group:empty) .step-msg {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-success-bg);
+    color: var(--color-success-text);
+    border-radius: var(--radius-pill);
+    font-weight: var(--font-semibold);
+  }
+
+  .map-type-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .type-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2);
+  }
+
+  .upload-card {
+    grid-template-columns: auto 1fr;
+    gap: var(--space-3);
+    margin: var(--space-3) auto var(--space-4);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+
+  .upload-card-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  .upload-card-copy strong {
+    font-size: var(--text-base);
+  }
+
+  .upload-card-copy span {
+    white-space: normal;
+  }
+
+  .upload-file-button {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  .canvas-wrapper {
+    min-height: 260px;
+    max-height: 62dvh;
+    border-radius: var(--radius-md);
+  }
+
+  .canvas-empty {
+    padding: var(--space-5);
+    text-align: center;
+  }
+
+  .next-section {
+    position: sticky;
+    bottom: var(--space-3);
+    z-index: 5;
+    margin-top: var(--space-4);
+  }
+
+  .btn-primary,
+  .btn-secondary {
+    width: 100%;
+    min-height: 46px;
+  }
+
+  .lm-modal-mask {
+    align-items: flex-end;
+    padding: var(--space-3);
+  }
+
+  .lm-modal-box {
+    max-height: 82dvh;
+    padding: var(--space-5) var(--space-4) var(--space-4);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+}
+
+@media (max-width: 380px) {
+  .upload-container {
+    padding-inline: 0;
+  }
 }
 </style>
