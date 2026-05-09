@@ -13,6 +13,7 @@ const magnifier = ref<HTMLCanvasElement | null>(null)
 
 const statusMessage = ref<string>('請選擇一張室內平面圖')
 const selectionStep = ref<number>(0)
+// 自訂上傳卡片使用的檔名與拖曳狀態，不影響實際地圖資料。
 const selectedFileName = ref('')
 const isDraggingFile = ref(false)
 
@@ -26,6 +27,7 @@ const showMagnifier = ref(false)
 const magnifierPos = ref({ x: 0, y: 0 })
 
 // Pinch-to-zoom / pan 狀態
+// canvas 顯示用 CSS transform 縮放，原始像素座標仍維持不變，方便送給 WASM。
 const scale = ref(1)
 const translateX = ref(0)
 const translateY = ref(0)
@@ -277,6 +279,7 @@ onUnmounted(() => {
 
 // ── 上傳圖片 ──────────────────────────────────────────────
 
+// 將使用者選取或拖放的圖片解碼成 ImageData，並縮放到 WASM 可接受的尺寸。
 function processImageFile(file: File) {
   selectedFileName.value = file.name
 
@@ -327,6 +330,7 @@ const handleFileUpload = (event: Event) => {
   processImageFile(target.files[0]!)
 }
 
+// 拖放和檔案選擇走同一個 processImageFile，避免兩套讀圖流程產生狀態差異。
 function handleFileDrop(event: DragEvent) {
   isDraggingFile.value = false
   const file = event.dataTransfer?.files?.[0]
@@ -334,6 +338,7 @@ function handleFileDrop(event: DragEvent) {
   processImageFile(file)
 }
 
+// dragleave 會在滑過子元素時觸發，需確認真的離開 upload card 才關閉高亮。
 function handleDragLeave(event: DragEvent) {
   const current = event.currentTarget as HTMLElement
   const next = event.relatedTarget as Node | null
@@ -373,6 +378,7 @@ const handleCanvasClick = (event: MouseEvent) => {
 // ── 標記點 ────────────────────────────────────────────────
 
 function commitPoint(x: number, y: number, ctx: CanvasRenderingContext2D) {
+  // 標記順序固定為種子點 → 起點 → 終點，種子點供 core.cpp 採樣路色。
   if (selectionStep.value === 1) {
     seedPoint.value = { x, y }
     mapStore.setSeedPoint(seedPoint.value)

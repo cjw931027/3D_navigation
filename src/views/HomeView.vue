@@ -11,8 +11,11 @@ const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
 const pathStatus = ref<string | null>(null)
+
+// 只有遮罩與路徑節點都存在時，3D 場景才有足夠資料可以建模。
 const canGoToScene = computed(() => mapStore.passableMask != null && mapStore.pathNodes.length > 0)
 
+// 進階參數直接對應 core.cpp 的 flood fill 前處理參數，文字提示說明何時調整。
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
     problem: '識別到的區域太小、路徑顏色不均勻',
@@ -46,6 +49,7 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
+// 將 A* 輸出的 pathNodes 疊回預覽圖，外圈黑線用來讓黃色路徑在淺色地圖上仍可辨識。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
@@ -72,6 +76,7 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   ctx.stroke()
 }
 
+// 起點與終點只畫在畫面層，不回寫到 imageRawData，避免下一次辨識把標記當成路色。
 function drawDot(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
@@ -91,12 +96,14 @@ function drawDot(
   ctx.fillText(label, point.x + 11, point.y - 5)
 }
 
+// 預覽圖每次重算後重畫路徑與起訖點，確保顯示結果和目前 store 狀態一致。
 function drawOverlay(ctx: CanvasRenderingContext2D) {
   if (mapStore.pathNodes.length >= 2) drawPath(ctx)
   if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
   if (mapStore.endPoint) drawDot(ctx, mapStore.endPoint, '#F44336', '終點')
 }
 
+// WASM 回傳的是 RGBA buffer，這裡轉成 canvas 可顯示的 ImageData。
 function renderToCanvas(
   buffer: Uint8ClampedArray,
   width: number,
@@ -112,6 +119,7 @@ function renderToCanvas(
   return ctx
 }
 
+// 呼叫 core.cpp 的 intelligentFloodFill，產生可通行遮罩後立即執行 A*。
 const runFloodFill = () => {
   if (!mapStore.wasmModule) return alert('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
@@ -154,6 +162,7 @@ const runFloodFill = () => {
       }
     }
 
+    // mapBuffer 是 WASM 端共用輸入記憶體，JS 需先寫入 RGBA 後再呼叫 C++。
     const pointer = mapStore.wasmModule.allocateMemory(size2) as number
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
@@ -201,6 +210,7 @@ const runFloodFill = () => {
     }
     mapStore.floodFillResultData = displayBuffer
 
+    // passableMask 由 core.cpp 保存在全域 buffer，複製一份到 Pinia 供 3D 場景使用。
     const maskPtr = mapStore.wasmModule.getPassableMaskBuffer() as number
     const maskLen = mapStore.wasmModule.getPassableMaskSize() as number
     const maskW = mapStore.wasmModule.getPassableMaskWidth() as number
@@ -237,6 +247,7 @@ const runFloodFill = () => {
   }
 }
 
+// 只重新跑 A*，保留上一次 flood fill 的遮罩，適合調整起訖點後快速重算。
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
   if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
