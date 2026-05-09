@@ -949,11 +949,50 @@ canvas {
 
 @media (max-width: 640px) {
   .home-container {
-    padding: var(--space-5) var(--space-4);
+    padding: var(--space-4) var(--space-2);
+  }
+
+  h1 {
+    margin-bottom: var(--space-4);
+  }
+
+  .empty-state {
+    padding: var(--space-8) var(--space-3);
   }
 
   .panel {
-    padding: var(--space-5);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+  }
+
+  .color-row {
+    margin-bottom: var(--space-4);
+  }
+
+  .color-chip {
+    align-items: flex-start;
+    width: 100%;
+    border-radius: var(--radius-md);
+    line-height: 1.5;
+  }
+
+  .section-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .tick {
+    width: 14px;
+  }
+
+  .advanced-toggle {
+    padding: var(--space-3) 0;
+  }
+
+  .sens-badge {
+    align-self: flex-start;
   }
 
   .sensitivity-row {
@@ -974,10 +1013,58 @@ canvas {
 
   .btn-row {
     flex-direction: column;
+    gap: var(--space-2);
   }
 
+  .btn-run,
   .btn-astar {
     width: 100%;
+    min-height: 46px;
+  }
+
+  .advanced-panel {
+    padding: var(--space-3);
+  }
+
+  .param-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .tooltip-box {
+    left: 50%;
+    width: min(260px, calc(100vw - 48px));
+    transform: translateX(-50%);
+  }
+
+  .result-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .canvas-container {
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+
+  canvas {
+    border-radius: var(--radius-md);
+  }
+
+  .flow-actions {
+    position: sticky;
+    bottom: var(--space-3);
+    z-index: 5;
+    display: grid;
+    grid-template-columns: 1fr;
+    margin-top: var(--space-4);
+  }
+
+  .flow-btn {
+    width: 100%;
+    min-height: 46px;
+    box-sizing: border-box;
   }
 }
 
@@ -1059,5 +1146,11 @@ canvas {
   color: var(--color-text-faded);
   line-height: 1.4;
   padding-left: 42px;
+}
+
+@media (max-width: 640px) {
+  .toggle-hint {
+    padding-left: 0;
+  }
 }
 </style>
