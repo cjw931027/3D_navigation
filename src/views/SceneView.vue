@@ -6,6 +6,7 @@ import { useMapStore } from '@/stores/mapStore'
 const mapStore = useMapStore()
 const container = ref<HTMLDivElement | null>(null)
 
+// Three.js 物件由本頁手動建立與釋放，避免切換頁面後殘留 WebGL 資源。
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
@@ -17,6 +18,7 @@ const mapGroup = new THREE.Group()
 const pathGroup = new THREE.Group()
 const avatarGroup = new THREE.Group()
 
+// 3D 場景依賴路徑識別頁輸出的 passableMask，沒有遮罩時只顯示提示。
 const hasMask = computed(
   () => !!mapStore.passableMask && mapStore.maskWidth > 0 && mapStore.maskHeight > 0,
 )
@@ -26,6 +28,7 @@ const WALL_HEIGHT_RATIO = 2.0
 const MAX_CELLS_LONG_SIDE = 200
 
 const viewMode = ref<'overview' | 'first-person'>('overview')
+// 第一人稱移動輸入以 -1/0/1 表示方向，animation loop 依 dt 積分成位移。
 const moveInput = reactive({ fwd: 0, rot: 0 })
 const offPath = ref(false)
 const OFF_PATH_THRESHOLD_PX = 18
@@ -1340,10 +1343,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="scene-view">
+    <!-- Three.js renderer 會掛到這個容器，大小由 ResizeObserver 同步。 -->
     <div ref="container" class="scene-canvas" />
 
+    <!-- 沒有遮罩時無法建立牆面與碰撞資料，只提示使用者回到前一步。 -->
     <div v-if="!hasMask" class="hint">尚未產生可通行遮罩，請先上傳地圖並執行一次路徑識別。</div>
 
+    <!-- 流程導覽保留在場景上層，避免使用者只能依賴頂部步驟條切頁。 -->
     <div class="scene-flow-actions">
       <RouterLink to="/path" class="scene-flow-btn">上一步：路徑識別</RouterLink>
       <RouterLink to="/upload" class="scene-flow-btn scene-flow-btn--primary">
@@ -1351,6 +1357,7 @@ onBeforeUnmount(() => {
       </RouterLink>
     </div>
 
+    <!-- 俯瞰與第一人稱共用同一套場景，只切換 camera 和控制模式。 -->
     <div v-if="hasMask" class="top-bar">
       <button
         class="mode-btn"
@@ -1368,11 +1375,13 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <!-- 偏離路徑時可從目前位置重新跑 A*，不重新做 flood fill。 -->
     <div v-if="offPath && viewMode === 'first-person'" class="offpath-banner">
       偵測到偏離路徑
       <button class="replan-btn" @click="replanFromCurrent">重新規劃</button>
     </div>
 
+    <!-- 手機觸控方向盤，輸入值會在 animation loop 轉成前進與旋轉速度。 -->
     <div v-if="viewMode === 'first-person' && hasMask" class="controls">
       <div class="pad">
         <button
