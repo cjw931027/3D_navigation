@@ -1357,21 +1357,13 @@ onBeforeUnmount(() => {
       </RouterLink>
     </div>
 
-    <!-- 俯瞰與第一人稱共用同一套場景，只切換 camera 和控制模式。 -->
+    <!-- 俯瞰與第一人稱共用同一套場景，以單一切換鈕切換模式；按鈕文字顯示按下後會進入的模式。 -->
     <div v-if="hasMask" class="top-bar">
       <button
         class="mode-btn"
-        :class="{ active: viewMode === 'overview' }"
-        @click="exitFirstPerson"
+        @click="viewMode === 'first-person' ? exitFirstPerson() : enterFirstPerson()"
       >
-        俯瞰
-      </button>
-      <button
-        class="mode-btn"
-        :class="{ active: viewMode === 'first-person' }"
-        @click="enterFirstPerson"
-      >
-        第一人稱
+        {{ viewMode === 'first-person' ? '俯瞰' : '第一人稱' }}
       </button>
     </div>
 
@@ -1579,5 +1571,137 @@ onBeforeUnmount(() => {
 .pad-btn.down {
   grid-column: 2;
   grid-row: 3;
+}
+
+@media (max-width: 720px) {
+  .scene-view {
+    height: calc(100dvh - 112px);
+    min-height: 520px;
+  }
+
+  .scene-canvas {
+    border-radius: var(--radius-md);
+  }
+
+  .hint {
+    top: 50%;
+    width: min(320px, calc(100% - 32px));
+    text-align: center;
+  }
+
+  .top-bar {
+    top: var(--space-3);
+    left: var(--space-3);
+  }
+
+  .mode-btn,
+  .scene-flow-btn,
+  .replan-btn {
+    min-height: 40px;
+  }
+
+  .scene-flow-actions {
+    top: var(--space-3);
+    right: var(--space-3);
+    left: auto;
+    justify-content: flex-end;
+  }
+
+  .scene-flow-btn {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  .offpath-banner {
+    top: 64px;
+    width: min(340px, calc(100% - 32px));
+    justify-content: center;
+    flex-wrap: wrap;
+    text-align: center;
+  }
+
+  .controls {
+    right: var(--space-3);
+    bottom: var(--space-3);
+  }
+
+  .pad {
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(3, 56px);
+    gap: var(--space-1);
+  }
+
+  .pad-btn {
+    font-size: var(--text-sm);
+  }
+}
+
+@media (max-width: 480px) {
+  .scene-view {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 104px);
+  }
+
+  .scene-canvas {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .top-bar {
+    right: var(--space-3);
+  }
+
+  .mode-btn {
+    flex: 1;
+    padding: var(--space-2);
+  }
+
+  .scene-flow-actions {
+    position: static;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .scene-flow-btn {
+    justify-content: center;
+    min-height: 32px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .offpath-banner {
+    top: 150px;
+  }
+
+  .controls {
+    left: 50%;
+    right: auto;
+    bottom: 110px;
+    transform: translateX(-50%);
+  }
+}
+
+@media (max-height: 620px) and (orientation: landscape) {
+  .scene-view {
+    height: calc(100dvh - 84px);
+    min-height: 360px;
+  }
+
+  .scene-flow-actions {
+    left: auto;
+  }
+
+  .pad {
+    grid-template-columns: repeat(3, 48px);
+    grid-template-rows: repeat(3, 48px);
+  }
+
+  .offpath-banner {
+    top: var(--space-3);
+  }
 }
 </style>
