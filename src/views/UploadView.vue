@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, onMounted, onUnmounted, toRaw, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import { FileImage, UploadCloud } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 
 const mapStore = useMapStore()
@@ -12,6 +13,9 @@ const magnifier = ref<HTMLCanvasElement | null>(null)
 
 const statusMessage = ref<string>('請選擇一張室內平面圖')
 const selectionStep = ref<number>(0)
+// 自訂上傳卡片使用的檔名與拖曳狀態，不影響實際地圖資料。
+const selectedFileName = ref('')
+const isDraggingFile = ref(false)
 
 const seedPoint = ref<{ x: number; y: number } | null>(null)
 const startPoint = ref<{ x: number; y: number } | null>(null)
@@ -23,6 +27,7 @@ const showMagnifier = ref(false)
 const magnifierPos = ref({ x: 0, y: 0 })
 
 // Pinch-to-zoom / pan 狀態
+// canvas 顯示用 CSS transform 縮放，原始像素座標仍維持不變，方便送給 WASM。
 const scale = ref(1)
 const translateX = ref(0)
 const translateY = ref(0)
@@ -274,9 +279,9 @@ onUnmounted(() => {
 
 // ── 上傳圖片 ──────────────────────────────────────────────
 
-const handleFileUpload = (event: Event) => {
-  const target = event.target as HTMLInputElement
-  if (!target.files?.length) return
+// 將使用者選取或拖放的圖片解碼成 ImageData，並縮放到 WASM 可接受的尺寸。
+function processImageFile(file: File) {
+  selectedFileName.value = file.name
 
   resetAll()
   statusMessage.value = '讀取中...'
@@ -316,7 +321,28 @@ const handleFileUpload = (event: Event) => {
     }
     img.src = (e.target as FileReader).result as string
   }
-  reader.readAsDataURL(target.files[0]!)
+  reader.readAsDataURL(file)
+}
+
+const handleFileUpload = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  if (!target.files?.length) return
+  processImageFile(target.files[0]!)
+}
+
+// 拖放和檔案選擇走同一個 processImageFile，避免兩套讀圖流程產生狀態差異。
+function handleFileDrop(event: DragEvent) {
+  isDraggingFile.value = false
+  const file = event.dataTransfer?.files?.[0]
+  if (!file || !file.type.startsWith('image/')) return
+  processImageFile(file)
+}
+
+// dragleave 會在滑過子元素時觸發，需確認真的離開 upload card 才關閉高亮。
+function handleDragLeave(event: DragEvent) {
+  const current = event.currentTarget as HTMLElement
+  const next = event.relatedTarget as Node | null
+  if (!next || !current.contains(next)) isDraggingFile.value = false
 }
 
 // ── 滑鼠事件 ──────────────────────────────────────────────
@@ -352,6 +378,7 @@ const handleCanvasClick = (event: MouseEvent) => {
 // ── 標記點 ────────────────────────────────────────────────
 
 function commitPoint(x: number, y: number, ctx: CanvasRenderingContext2D) {
+  // 標記順序固定為種子點 → 起點 → 終點，種子點供 core.cpp 採樣路色。
   if (selectionStep.value === 1) {
     seedPoint.value = { x, y }
     mapStore.setSeedPoint(seedPoint.value)
@@ -436,7 +463,7 @@ function resetZoom() {
   translateY.value = 0
 }
 
-const goToProcess = () => router.push('/')
+const goToProcess = () => router.push('/path')
 </script>
 
 <template>
@@ -499,17 +526,55 @@ const goToProcess = () => router.push('/')
       </div>
     </div>
 
-    <div class="input-section">
-      <input type="file" accept="image/png, image/jpeg" @change="handleFileUpload" />
+    <div
+      class="upload-card"
+      :class="{
+        'upload-card--active': mapStore.imageRawData,
+        'upload-card--dragging': isDraggingFile,
+      }"
+      @dragenter.prevent="isDraggingFile = true"
+      @dragover.prevent="isDraggingFile = true"
+      @dragleave.prevent="handleDragLeave"
+      @drop.prevent="handleFileDrop"
+    >
+      <div class="upload-card-icon" aria-hidden="true">
+        <UploadCloud :size="30" :stroke-width="1.75" />
+      </div>
+      <div class="upload-card-copy">
+        <strong>{{ mapStore.imageRawData ? '已載入平面圖' : '選擇室內平面圖' }}</strong>
+        <span>
+          {{
+            selectedFileName ||
+            (mapStore.imageRawData ? statusMessage : '支援 PNG、JPG，建議使用清晰平面圖')
+          }}
+        </span>
+      </div>
+      <label class="upload-file-button">
+        <input
+          class="visually-hidden"
+          type="file"
+          accept="image/png, image/jpeg"
+          @change="handleFileUpload"
+        />
+        選擇檔案
+      </label>
     </div>
 
     <!-- Canvas 區域 -->
     <div
       ref="canvasWrapper"
       class="canvas-wrapper"
-      :class="{ locked: selectionStep === 4 || selectionStep === 0 }"
+      :class="{
+        locked: selectionStep === 4 || selectionStep === 0,
+        empty: mapStore.mapWidth === 0,
+      }"
     >
+      <div v-if="mapStore.mapWidth === 0" class="canvas-empty">
+        <FileImage :size="44" :stroke-width="1.5" />
+        <span>上傳後會在這裡預覽地圖</span>
+      </div>
       <canvas
+        v-show="mapStore.mapWidth > 0"
         ref="mapCanvas"
         :style="{
           transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
@@ -536,7 +601,7 @@ const goToProcess = () => router.push('/')
 
     <!-- 完成後 -->
     <div v-if="selectionStep === 4" class="next-section">
-      <button class="btn-primary" @click="goToProcess">執行路徑識別</button>
+      <button class="btn-primary" @click="goToProcess">下一步：路徑識別</button>
     </div>
   </main>
 </template>
@@ -660,17 +725,98 @@ h2 {
 }
 
 /* 上傳 */
-.input-section {
-  margin-bottom: var(--space-3);
+.upload-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 620px;
+  margin: var(--space-4) auto var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-white);
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background-color 0.2s ease;
 }
 
-input[type='file'] {
-  padding: var(--space-2);
-  border: 1px solid var(--color-text-tick);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+.upload-card--active {
+  border-color: var(--color-primary);
+}
+
+.upload-card--dragging {
+  border-color: var(--color-primary);
+  background: var(--color-info-bg);
+  box-shadow: 0 0 0 4px var(--color-primary-ring);
+}
+
+.upload-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-circle);
+  background: var(--color-info-bg);
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.upload-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.upload-card-copy strong {
+  color: var(--color-text);
+  font-size: var(--text-md);
+  font-weight: var(--font-semibold);
+}
+
+.upload-card-copy span {
+  overflow: hidden;
+  color: var(--color-text-muted);
   font-size: var(--text-base);
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-primary);
+  color: var(--color-white);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+  transition: background 0.2s ease;
   touch-action: manipulation;
+  white-space: nowrap;
+}
+
+.upload-file-button:hover {
+  background: var(--color-primary-hover);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
 }
 
 /* Canvas wrapper
@@ -679,15 +825,23 @@ input[type='file'] {
 .canvas-wrapper {
   position: relative;
   overflow: auto; /* 圖片超出時可捲動，不裁切 */
-  border: 1px dashed var(--color-text-hint);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-soft);
+  min-height: 320px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-white);
   display: flex;
   align-items: flex-start;
   justify-content: center;
+  box-shadow: var(--shadow-sm);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+}
+
+.canvas-wrapper.empty {
+  align-items: center;
+  border-style: dashed;
+  background: var(--color-bg-card);
 }
 
 .canvas-wrapper.locked {
@@ -701,6 +855,16 @@ canvas {
   height: auto;
   background: white;
   will-change: transform;
+}
+
+.canvas-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+  font-weight: var(--font-medium);
 }
 
 /* 放大鏡 */
@@ -882,5 +1046,160 @@ canvas {
 
 .btn-reset-type:hover {
   background: var(--color-override-bg);
+}
+
+@media (max-width: 640px) {
+  .upload-container {
+    padding: var(--space-4) var(--space-2);
+  }
+
+  h2 {
+    margin-bottom: var(--space-1);
+  }
+
+  .status {
+    margin-bottom: var(--space-2);
+  }
+
+  .steps-bar {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+    gap: var(--space-1);
+    scrollbar-width: none;
+  }
+
+  .steps-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .step {
+    flex: 0 0 auto;
+    padding: 2px var(--space-2);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .step-sep {
+    flex-shrink: 0;
+  }
+
+  .action-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .btn-group {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-2);
+  }
+
+  .btn-type {
+    min-height: 40px;
+  }
+
+  .btn-sm {
+    min-height: 36px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .step-msg {
+    line-height: 1.45;
+  }
+
+  .action-bar:has(.btn-group:empty) .step-msg {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-success-bg);
+    color: var(--color-success-text);
+    border-radius: var(--radius-pill);
+    font-weight: var(--font-semibold);
+  }
+
+  .map-type-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .type-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2);
+  }
+
+  .upload-card {
+    grid-template-columns: auto 1fr;
+    gap: var(--space-3);
+    margin: var(--space-3) auto var(--space-4);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+
+  .upload-card-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  .upload-card-copy strong {
+    font-size: var(--text-base);
+  }
+
+  .upload-card-copy span {
+    white-space: normal;
+  }
+
+  .upload-file-button {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  .canvas-wrapper {
+    min-height: 260px;
+    max-height: 62dvh;
+    border-radius: var(--radius-md);
+  }
+
+  .canvas-empty {
+    padding: var(--space-5);
+    text-align: center;
+  }
+
+  .next-section {
+    position: sticky;
+    bottom: var(--space-3);
+    z-index: 5;
+    margin-top: var(--space-4);
+  }
+
+  .btn-primary,
+  .btn-secondary {
+    width: 100%;
+    min-height: 46px;
+  }
+
+  .lm-modal-mask {
+    align-items: flex-end;
+    padding: var(--space-3);
+  }
+
+  .lm-modal-box {
+    max-height: 82dvh;
+    padding: var(--space-5) var(--space-4) var(--space-4);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+}
+
+@media (max-width: 380px) {
+  .upload-container {
+    padding-inline: 0;
+  }
 }
 </style>

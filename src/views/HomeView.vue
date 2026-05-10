@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, toRaw } from 'vue'
+import { computed, ref, toRaw } from 'vue'
+import { ImageOff, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 import type { MapMode } from '@/stores/mapStore'
 
@@ -11,6 +12,10 @@ const previewCanvas = ref<HTMLCanvasElement | null>(null)
 const activeTooltip = ref<string | null>(null)
 const pathStatus = ref<string | null>(null)
 
+// 只有遮罩與路徑節點都存在時，3D 場景才有足夠資料可以建模。
+const canGoToScene = computed(() => mapStore.passableMask != null && mapStore.pathNodes.length > 0)
+
+// 進階參數直接對應 core.cpp 的 flood fill 前處理參數，文字提示說明何時調整。
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
     problem: '識別到的區域太小、路徑顏色不均勻',
@@ -44,7 +49,7 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-
+// 將 A* 輸出的 pathNodes 疊回預覽圖，外圈黑線用來讓黃色路徑在淺色地圖上仍可辨識。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
@@ -71,6 +76,7 @@ function drawPath(ctx: CanvasRenderingContext2D) {
   ctx.stroke()
 }
 
+// 起點與終點只畫在畫面層，不回寫到 imageRawData，避免下一次辨識把標記當成路色。
 function drawDot(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
@@ -90,12 +96,14 @@ function drawDot(
   ctx.fillText(label, point.x + 11, point.y - 5)
 }
 
+// 預覽圖每次重算後重畫路徑與起訖點，確保顯示結果和目前 store 狀態一致。
 function drawOverlay(ctx: CanvasRenderingContext2D) {
   if (mapStore.pathNodes.length >= 2) drawPath(ctx)
   if (mapStore.startPoint) drawDot(ctx, mapStore.startPoint, '#4CAF50', '起點')
   if (mapStore.endPoint) drawDot(ctx, mapStore.endPoint, '#F44336', '終點')
 }
 
+// WASM 回傳的是 RGBA buffer，這裡轉成 canvas 可顯示的 ImageData。
 function renderToCanvas(
   buffer: Uint8ClampedArray,
   width: number,
@@ -111,6 +119,7 @@ function renderToCanvas(
   return ctx
 }
 
+// 呼叫 core.cpp 的 intelligentFloodFill，產生可通行遮罩後立即執行 A*。
 const runFloodFill = () => {
   if (!mapStore.wasmModule) return alert('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
@@ -153,6 +162,7 @@ const runFloodFill = () => {
       }
     }
 
+    // mapBuffer 是 WASM 端共用輸入記憶體，JS 需先寫入 RGBA 後再呼叫 C++。
     const pointer = mapStore.wasmModule.allocateMemory(size2) as number
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
@@ -200,6 +210,7 @@ const runFloodFill = () => {
     }
     mapStore.floodFillResultData = displayBuffer
 
+    // passableMask 由 core.cpp 保存在全域 buffer，複製一份到 Pinia 供 3D 場景使用。
     const maskPtr = mapStore.wasmModule.getPassableMaskBuffer() as number
     const maskLen = mapStore.wasmModule.getPassableMaskSize() as number
     const maskW = mapStore.wasmModule.getPassableMaskWidth() as number
@@ -236,6 +247,7 @@ const runFloodFill = () => {
   }
 }
 
+// 只重新跑 A*，保留上一次 flood fill 的遮罩，適合調整起訖點後快速重算。
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
   if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
@@ -268,10 +280,19 @@ const runAStarOnly = () => {
   <main class="home-container">
     <h1>路徑識別</h1>
 
-    <div class="warn-panel" v-if="mapStore.mapWidth === 0">
-      尚未載入地圖，請先前往
-      <router-link to="/upload">上傳地圖</router-link>
-      並完成標記。
+    <div class="empty-state" v-if="mapStore.mapWidth === 0">
+      <div class="empty-icon">
+        <ImageOff :size="48" :stroke-width="1.5" />
+      </div>
+      <h2 class="empty-title">還沒有載入地圖</h2>
+      <p class="empty-desc">
+        請先上傳室內平面圖並標記起點與終點，<br />
+        系統才能識別可通行路徑。
+      </p>
+      <RouterLink to="/upload" class="empty-action">
+        <Upload :size="16" />
+        前往上傳地圖
+      </RouterLink>
     </div>
 
     <template v-else>
@@ -290,7 +311,6 @@ const runAStarOnly = () => {
           </div>
           <div class="color-chip muted" v-else>路色未採樣</div>
         </div>
-
 
         <!-- 靈敏度 -->
         <div class="section-label" style="margin-top: 20px">
@@ -440,6 +460,16 @@ const runAStarOnly = () => {
       <div class="canvas-container">
         <canvas ref="previewCanvas"></canvas>
       </div>
+
+      <div class="flow-actions">
+        <RouterLink to="/upload" class="flow-btn flow-btn--secondary">上一步：上傳地圖</RouterLink>
+        <RouterLink v-if="canGoToScene" to="/scene" class="flow-btn flow-btn--primary">
+          下一步：3D 場景
+        </RouterLink>
+        <button v-else class="flow-btn flow-btn--primary" type="button" disabled>
+          下一步：3D 場景
+        </button>
+      </div>
     </template>
   </main>
 </template>
@@ -459,19 +489,57 @@ h1 {
   margin-bottom: var(--space-5);
 }
 
-.warn-panel {
-  margin: var(--space-10) auto;
-  max-width: 480px;
-  padding: var(--space-5);
-  background: var(--color-warn-bg);
-  border: 1px solid var(--color-warn-border);
-  border-radius: var(--radius-md);
-  color: var(--color-warn-text);
-  font-size: var(--text-base);
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 400px;
+  margin: 0 auto;
+  padding: var(--space-10) var(--space-5);
 }
-.warn-panel a {
-  color: var(--color-primary);
+
+.empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  border-radius: var(--radius-circle);
+  background: var(--color-bg-soft);
+  color: var(--color-text-muted);
+}
+
+.empty-title {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--color-text);
+  font-size: 18px;
   font-weight: var(--font-semibold);
+}
+
+.empty-desc {
+  margin: 0 0 var(--space-5);
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-primary);
+  color: var(--color-white);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+
+.empty-action:hover {
+  background: var(--color-primary-hover);
 }
 
 .panel {
@@ -479,26 +547,27 @@ h1 {
   padding: var(--space-6);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  max-width: 600px;
-  background: var(--color-bg-card);
+  max-width: 760px;
+  background: var(--color-white);
+  box-shadow: var(--shadow-sm);
   text-align: left;
 }
 
 .color-row {
   display: flex;
-  margin-bottom: var(--space-5);
+  margin-bottom: var(--space-6);
 }
 
 .color-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: var(--text-sm);
-  color: var(--color-text-tertiary);
-  background: white;
+  gap: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+  background: var(--color-white);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-4);
 }
 .color-chip.muted {
   color: var(--color-text-placeholder);
@@ -514,44 +583,40 @@ h1 {
 }
 
 .section-label {
-  font-size: var(--text-sm);
-  font-weight: var(--font-bold);
-  color: var(--color-text-muted);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  margin-bottom: var(--space-2);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-3);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-3);
 }
 
 .sens-badge {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-white);
   border-radius: var(--radius-pill);
-  padding: 1px var(--space-3);
+  padding: var(--space-1) var(--space-4);
   font-size: var(--text-base);
-  letter-spacing: 0;
-  text-transform: none;
-  min-width: 26px;
+  min-width: 34px;
   text-align: center;
 }
 
 .sensitivity-wrap {
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--space-4);
 }
 
 .sensitivity-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-3);
 }
 
 .sens-end-label {
-  font-size: var(--text-xs);
-  color: var(--color-text-placeholder);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
   white-space: nowrap;
-  width: 26px;
+  width: 36px;
   text-align: center;
 }
 
@@ -564,14 +629,51 @@ h1 {
 
 .sensitivity-slider {
   width: 100%;
+  height: 6px;
+  margin: var(--space-2) 0;
   cursor: pointer;
   accent-color: var(--color-primary);
+}
+
+.sensitivity-slider::-webkit-slider-runnable-track,
+.param-row input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+}
+
+.sensitivity-slider::-webkit-slider-thumb,
+.param-row input[type='range']::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border: 3px solid var(--color-white);
+  border-radius: var(--radius-circle);
+  background: var(--color-primary);
+  box-shadow: var(--shadow-thumb);
+}
+
+.sensitivity-slider::-moz-range-track,
+.param-row input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+}
+
+.sensitivity-slider::-moz-range-thumb,
+.param-row input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 3px solid var(--color-white);
+  border-radius: var(--radius-circle);
+  background: var(--color-primary);
+  box-shadow: var(--shadow-thumb);
 }
 
 .tick-row {
   display: flex;
   justify-content: space-between;
-  padding: 0 1px;
+  padding: 0 var(--space-1);
 }
 
 .tick {
@@ -593,11 +695,10 @@ h1 {
 .sensitivity-guide {
   display: flex;
   justify-content: space-between;
-  font-size: var(--text-xs);
-  color: var(--color-text-hint);
-  margin-top: var(--space-1);
-  margin-bottom: var(--space-1);
-  padding: 0 34px;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+  padding: 0 48px;
 }
 
 .advanced-toggle {
@@ -606,22 +707,24 @@ h1 {
   justify-content: space-between;
   font-size: var(--text-sm);
   font-weight: var(--font-bold);
-  color: var(--color-text-placeholder);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--color-text-secondary);
   cursor: pointer;
-  padding: var(--space-3) 0 var(--space-2);
+  padding: var(--space-4) 0 var(--space-3);
   border-top: 1px solid var(--color-border-light);
-  margin-top: var(--space-4);
+  margin-top: var(--space-5);
   user-select: none;
   touch-action: manipulation;
 }
 .toggle-arrow {
   font-size: var(--text-base);
+  color: var(--color-text-muted);
 }
 
 .advanced-panel {
-  padding-top: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
   margin-bottom: var(--space-4);
 }
 
@@ -647,9 +750,9 @@ h1 {
 
 .param-label strong {
   background: var(--color-primary);
-  color: white;
-  border-radius: var(--radius-sm);
-  padding: 1px var(--space-2);
+  color: var(--color-white);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
   font-size: var(--text-base);
   min-width: 28px;
   text-align: center;
@@ -657,6 +760,7 @@ h1 {
 
 .param-row input[type='range'] {
   width: 100%;
+  height: 6px;
   cursor: pointer;
   accent-color: var(--color-primary);
 }
@@ -702,17 +806,18 @@ h1 {
 
 .btn-row {
   display: flex;
-  gap: 8px;
-  margin-top: var(--space-2);
+  gap: var(--space-3);
+  margin-top: var(--space-5);
 }
 
 .btn-run {
   flex: 1;
-  padding: var(--space-3);
+  min-height: 48px;
+  padding: var(--space-3) var(--space-5);
   font-size: var(--text-md);
-  font-weight: var(--font-bold);
-  background: var(--color-accent);
-  color: white;
+  font-weight: var(--font-semibold);
+  background: var(--color-primary);
+  color: var(--color-white);
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -720,7 +825,7 @@ h1 {
   touch-action: manipulation;
 }
 .btn-run:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+  background: var(--color-primary-hover);
 }
 .btn-run:disabled {
   opacity: 0.4;
@@ -728,20 +833,24 @@ h1 {
 }
 
 .btn-astar {
-  padding: var(--space-3) var(--space-4);
+  min-height: 48px;
+  padding: var(--space-3) var(--space-5);
   font-size: var(--text-base);
-  font-weight: var(--font-bold);
-  background: var(--color-primary);
-  color: white;
-  border: none;
+  font-weight: var(--font-semibold);
+  background: var(--color-white);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.2s;
+  transition:
+    background 0.2s,
+    color 0.2s,
+    border-color 0.2s;
   touch-action: manipulation;
   white-space: nowrap;
 }
 .btn-astar:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  background: var(--color-info-bg);
 }
 .btn-astar:disabled {
   opacity: 0.4;
@@ -753,7 +862,11 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-soft);
   font-size: var(--text-base);
   flex-wrap: wrap;
 }
@@ -778,9 +891,181 @@ h1 {
 canvas {
   max-width: 100%;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: white;
+  border-radius: var(--radius-lg);
+  background: var(--color-white);
   box-shadow: var(--shadow-sm);
+}
+
+.flow-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-5);
+}
+
+.flow-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.flow-btn--primary {
+  background: var(--color-primary);
+  color: var(--color-white);
+}
+
+.flow-btn--primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.flow-btn--secondary {
+  background: var(--color-white);
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.flow-btn--secondary:hover {
+  background: var(--color-bg-hover);
+}
+
+.flow-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .home-container {
+    padding: var(--space-4) var(--space-2);
+  }
+
+  h1 {
+    margin-bottom: var(--space-4);
+  }
+
+  .empty-state {
+    padding: var(--space-8) var(--space-3);
+  }
+
+  .panel {
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+  }
+
+  .color-row {
+    margin-bottom: var(--space-4);
+  }
+
+  .color-chip {
+    align-items: flex-start;
+    width: 100%;
+    border-radius: var(--radius-md);
+    line-height: 1.5;
+  }
+
+  .section-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .tick {
+    width: 14px;
+  }
+
+  .advanced-toggle {
+    padding: var(--space-3) 0;
+  }
+
+  .sens-badge {
+    align-self: flex-start;
+  }
+
+  .sensitivity-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sens-end-label {
+    width: auto;
+    text-align: left;
+  }
+
+  .sensitivity-guide {
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: 0;
+  }
+
+  .btn-row {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .btn-run,
+  .btn-astar {
+    width: 100%;
+    min-height: 46px;
+  }
+
+  .advanced-panel {
+    padding: var(--space-3);
+  }
+
+  .param-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .tooltip-box {
+    left: 50%;
+    width: min(260px, calc(100vw - 48px));
+    transform: translateX(-50%);
+  }
+
+  .result-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .canvas-container {
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+
+  canvas {
+    border-radius: var(--radius-md);
+  }
+
+  .flow-actions {
+    position: sticky;
+    bottom: var(--space-3);
+    z-index: 5;
+    display: grid;
+    grid-template-columns: 1fr;
+    margin-top: var(--space-4);
+  }
+
+  .flow-btn {
+    width: 100%;
+    min-height: 46px;
+    box-sizing: border-box;
+  }
 }
 
 /* 前處理區 */
@@ -861,5 +1146,11 @@ canvas {
   color: var(--color-text-faded);
   line-height: 1.4;
   padding-left: 42px;
+}
+
+@media (max-width: 640px) {
+  .toggle-hint {
+    padding-left: 0;
+  }
 }
 </style>
