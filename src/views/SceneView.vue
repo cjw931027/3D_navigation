@@ -6,6 +6,7 @@ import { useMapStore } from '@/stores/mapStore'
 const mapStore = useMapStore()
 const container = ref<HTMLDivElement | null>(null)
 
+// Three.js 物件由本頁手動建立與釋放，避免切換頁面後殘留 WebGL 資源。
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
@@ -17,6 +18,7 @@ const mapGroup = new THREE.Group()
 const pathGroup = new THREE.Group()
 const avatarGroup = new THREE.Group()
 
+// 3D 場景依賴路徑識別頁輸出的 passableMask，沒有遮罩時只顯示提示。
 const hasMask = computed(
   () => !!mapStore.passableMask && mapStore.maskWidth > 0 && mapStore.maskHeight > 0,
 )
@@ -26,6 +28,7 @@ const WALL_HEIGHT_RATIO = 2.0
 const MAX_CELLS_LONG_SIDE = 200
 
 const viewMode = ref<'overview' | 'first-person'>('overview')
+// 第一人稱移動輸入以 -1/0/1 表示方向，animation loop 依 dt 積分成位移。
 const moveInput = reactive({ fwd: 0, rot: 0 })
 const offPath = ref(false)
 const OFF_PATH_THRESHOLD_PX = 18
@@ -1340,34 +1343,37 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="scene-view">
+    <!-- Three.js renderer 會掛到這個容器，大小由 ResizeObserver 同步。 -->
     <div ref="container" class="scene-canvas" />
 
-    <div v-if="!hasMask" class="hint">
-      尚未產生可通行遮罩，請先到「首頁」上傳地圖並執行一次路徑識別。
+    <!-- 沒有遮罩時無法建立牆面與碰撞資料，只提示使用者回到前一步。 -->
+    <div v-if="!hasMask" class="hint">尚未產生可通行遮罩，請先上傳地圖並執行一次路徑識別。</div>
+
+    <!-- 流程導覽保留在場景上層，避免使用者只能依賴頂部步驟條切頁。 -->
+    <div class="scene-flow-actions">
+      <RouterLink to="/path" class="scene-flow-btn">上一步：路徑識別</RouterLink>
+      <RouterLink to="/upload" class="scene-flow-btn scene-flow-btn--primary">
+        回到第一步：上傳地圖
+      </RouterLink>
     </div>
 
+    <!-- 俯瞰與第一人稱共用同一套場景，以單一切換鈕切換模式；按鈕文字顯示按下後會進入的模式。 -->
     <div v-if="hasMask" class="top-bar">
       <button
         class="mode-btn"
-        :class="{ active: viewMode === 'overview' }"
-        @click="exitFirstPerson"
+        @click="viewMode === 'first-person' ? exitFirstPerson() : enterFirstPerson()"
       >
-        俯瞰
-      </button>
-      <button
-        class="mode-btn"
-        :class="{ active: viewMode === 'first-person' }"
-        @click="enterFirstPerson"
-      >
-        第一人稱
+        {{ viewMode === 'first-person' ? '俯瞰' : '第一人稱' }}
       </button>
     </div>
 
+    <!-- 偏離路徑時可從目前位置重新跑 A*，不重新做 flood fill。 -->
     <div v-if="offPath && viewMode === 'first-person'" class="offpath-banner">
       偵測到偏離路徑
       <button class="replan-btn" @click="replanFromCurrent">重新規劃</button>
     </div>
 
+    <!-- 手機觸控方向盤，輸入值會在 animation loop 轉成前進與旋轉速度。 -->
     <div v-if="viewMode === 'first-person' && hasMask" class="controls">
       <div class="pad">
         <button
@@ -1440,6 +1446,43 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-md);
   font-size: var(--text-base);
   pointer-events: none;
+}
+
+.scene-flow-actions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.scene-flow-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-md);
+  background: var(--color-scene-panel);
+  color: var(--color-scene-text);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.scene-flow-btn:hover {
+  background: var(--color-primary-hover);
+  color: var(--color-white);
+}
+
+.scene-flow-btn--primary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-white);
 }
 
 .top-bar {
@@ -1528,5 +1571,137 @@ onBeforeUnmount(() => {
 .pad-btn.down {
   grid-column: 2;
   grid-row: 3;
+}
+
+@media (max-width: 720px) {
+  .scene-view {
+    height: calc(100dvh - 112px);
+    min-height: 520px;
+  }
+
+  .scene-canvas {
+    border-radius: var(--radius-md);
+  }
+
+  .hint {
+    top: 50%;
+    width: min(320px, calc(100% - 32px));
+    text-align: center;
+  }
+
+  .top-bar {
+    top: var(--space-3);
+    left: var(--space-3);
+  }
+
+  .mode-btn,
+  .scene-flow-btn,
+  .replan-btn {
+    min-height: 40px;
+  }
+
+  .scene-flow-actions {
+    top: var(--space-3);
+    right: var(--space-3);
+    left: auto;
+    justify-content: flex-end;
+  }
+
+  .scene-flow-btn {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  .offpath-banner {
+    top: 64px;
+    width: min(340px, calc(100% - 32px));
+    justify-content: center;
+    flex-wrap: wrap;
+    text-align: center;
+  }
+
+  .controls {
+    right: var(--space-3);
+    bottom: var(--space-3);
+  }
+
+  .pad {
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(3, 56px);
+    gap: var(--space-1);
+  }
+
+  .pad-btn {
+    font-size: var(--text-sm);
+  }
+}
+
+@media (max-width: 480px) {
+  .scene-view {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 104px);
+  }
+
+  .scene-canvas {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .top-bar {
+    right: var(--space-3);
+  }
+
+  .mode-btn {
+    flex: 1;
+    padding: var(--space-2);
+  }
+
+  .scene-flow-actions {
+    position: static;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .scene-flow-btn {
+    justify-content: center;
+    min-height: 32px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .offpath-banner {
+    top: 150px;
+  }
+
+  .controls {
+    left: 50%;
+    right: auto;
+    bottom: 110px;
+    transform: translateX(-50%);
+  }
+}
+
+@media (max-height: 620px) and (orientation: landscape) {
+  .scene-view {
+    height: calc(100dvh - 84px);
+    min-height: 360px;
+  }
+
+  .scene-flow-actions {
+    left: auto;
+  }
+
+  .pad {
+    grid-template-columns: repeat(3, 48px);
+    grid-template-rows: repeat(3, 48px);
+  }
+
+  .offpath-banner {
+    top: var(--space-3);
+  }
 }
 </style>
