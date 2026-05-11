@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, ref, toRaw } from 'vue'
 import { ImageOff, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
@@ -167,8 +167,8 @@ const runFloodFill = () => {
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
     // mode: 0 = 色塊圖 RGB，1 = 線稿圖 HSL。
-    const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
-    const normInt = 0
+    // const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
+    const modeInt = 0
     const denoiseArea = mapStore.denoiseMinArea * up * up
     mapStore.wasmModule.intelligentFloodFill(
       W2,
@@ -179,9 +179,8 @@ const runFloodFill = () => {
       p.closingKernelSize,
       p.wallThicken,
       p.sampleRadius,
-      modeInt,
-      normInt,
       denoiseArea,
+      p.spanThreshold,
     )
 
     // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
