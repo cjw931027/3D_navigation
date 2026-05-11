@@ -45,35 +45,35 @@ struct HSL { float h, s, l; };
 
 
 // RGB轉換成HSL
-HSL rgbtohsl(uint8_t r8, uint8_t g8, uint8_t b8) {
-    float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
-    float mx = std::max({r, g, b}), mn = std::min({r, g, b});
-    float l = (mx + mn) * 0.5f; //亮度，rgb的最大最小值相加除2
-    float d = mx - mn; 
-    float h = 0, s = 0; // 預設是灰階
-    if (d > 1e-6f) { // 有顏色，代公式計算飽和度S和色相H
-        s = (l > 0.5f) ? d / (2.0f - mx - mn) : d / (mx + mn);
-        if (mx == r)      h = (g - b) / d + (g < b ? 6.0f : 0.0f);
-        else if (mx == g) h = (b - r) / d + 2.0f;
-        else              h = (r - g) / d + 4.0f;
-        h *= 60.0f;
-    }
-    return { h, s, l };
-}
+// HSL rgbtohsl(uint8_t r8, uint8_t g8, uint8_t b8) {
+//     float r = r8 / 255.0f, g = g8 / 255.0f, b = b8 / 255.0f;
+//     float mx = std::max({r, g, b}), mn = std::min({r, g, b});
+//     float l = (mx + mn) * 0.5f; //亮度，rgb的最大最小值相加除2
+//     float d = mx - mn; 
+//     float h = 0, s = 0; // 預設是灰階
+//     if (d > 1e-6f) { // 有顏色，代公式計算飽和度S和色相H
+//         s = (l > 0.5f) ? d / (2.0f - mx - mn) : d / (mx + mn);
+//         if (mx == r)      h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+//         else if (mx == g) h = (b - r) / d + 2.0f;
+//         else              h = (r - g) / d + 4.0f;
+//         h *= 60.0f;
+//     }
+//     return { h, s, l };
+// }
 
 // 計算兩個HSL顏色的差異度，當平均飽和度極低 (satAvg < 0.12f) 時，視為黑白/灰階線稿圖。
-float hslDist(HSL a, HSL b) {
-    float dL = a.l - b.l;
-    float dS = a.s - b.s;
-    float satAvg = (a.s + b.s) * 0.5f;
-    if (satAvg < 0.12f) {
-        return std::sqrt(dL * dL * 4.0f + dS * dS);
-    }
-    float dH = std::abs(a.h - b.h);
-    if (dH > 180.0f) dH = 360.0f - dH;
-    dH /= 360.0f;
-    return std::sqrt(dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
-}
+// float hslDist(HSL a, HSL b) {
+//     float dL = a.l - b.l;
+//     float dS = a.s - b.s;
+//     float satAvg = (a.s + b.s) * 0.5f;
+//     if (satAvg < 0.12f) {
+//         return (dL * dL * 4.0f + dS * dS);
+//     }
+//     float dH = std::abs(a.h - b.h);
+//     if (dH > 180.0f) dH = 360.0f - dH;
+//     dH /= 360.0f;
+//     return (dH * dH * 2.0f + dS * dS + dL * dL * 2.0f);
+// }
 
 // 依照點選的種子點搜索周圍radius內最常出現的顏色，當作真正的種子點，以防點錯(採色半徑)
 std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
@@ -169,6 +169,92 @@ void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     mask = result;
 }
 
+// 帶屏障的膨脹：與 dilate 相同，但膨脹時絕不覆蓋 wallMask 中標記為牆的像素。
+// 空的 wallMask 代表功能停用，等同原本的 dilate。
+void dilateWithBarrier(std::vector<uint8_t>& mask, const std::vector<uint8_t>& wallMask,
+                        int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    if (wallMask.empty()) { dilate(mask, width, height, kSize); return; }
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++)
+        for (int x = half; x < width - half; x++)
+            if (mask[y*width + x] == 1)
+                for (int ky = -half; ky <= half; ky++)
+                    for (int kx = -half; kx <= half; kx++) {
+                        int ni = (y+ky)*width + (x+kx);
+                        if (wallMask[ni] == 0) // 只有非牆像素才允許膨脹
+                            result[ni] = 1;
+                    }
+    mask = result;
+}
+
+// 建立「絕對屏障遮罩」：
+//   1. 以 darkThreshold 過濾出深色（文字＋牆壁）像素。
+//   2. 對深色像素做 8 連通域 BFS，計算包圍盒最大跨度 maxSpan。
+//   3. maxSpan >= spanThreshold 者視為真牆壁，加入 wallMask；否則視為文字，排除。
+// spanThreshold = 0 表示停用，回傳空向量（呼叫方會 fallback 到無屏障 dilate）。
+std::vector<uint8_t> buildWallMask(int width, int height,
+                                    uint8_t darkThreshold, int spanThreshold) {
+    std::vector<uint8_t> wallMask; 
+    if (spanThreshold <= 0) return wallMask;
+
+    int total = width * height;
+    wallMask.assign(total, 0);
+
+    // 標記深色像素
+    std::vector<bool> isDark(total, false);
+    for (int i = 0; i < total; i++) {
+        int brightness = ((int)mapBuffer[i*4] + mapBuffer[i*4+1] + mapBuffer[i*4+2]) / 3;
+        if (brightness < (int)darkThreshold) isDark[i] = true;
+    }
+
+    // 8 連通域 BFS
+    std::vector<bool> visited(total, false);
+    const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy8[] = {-1, -1, -1,  0, 0,  1, 1, 1};
+
+    std::vector<int> queue;
+    queue.reserve(512);
+
+    for (int start = 0; start < total; start++) {
+        if (!isDark[start] || visited[start]) continue;
+
+        queue.clear();
+        queue.push_back(start);
+        visited[start] = true;
+
+        int minX = start % width, maxX = minX;
+        int minY = start / width, maxY = minY;
+        int head = 0;
+
+        while (head < (int)queue.size()) {
+            int cur = queue[head++];
+            int cx = cur % width, cy = cur / width;
+            if (cx < minX) minX = cx;
+            if (cx > maxX) maxX = cx;
+            if (cy < minY) minY = cy;
+            if (cy > maxY) maxY = cy;
+
+            for (int d = 0; d < 8; d++) {
+                int nx = cx + dx8[d], ny = cy + dy8[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && isDark[ni]) {
+                    visited[ni] = true;
+                    queue.push_back(ni);
+                }
+            }
+        }
+        int maxSpan = std::max(maxX - minX, maxY - minY);
+        if (maxSpan >= spanThreshold) {
+            for (int idx : queue) wallMask[idx] = 1;
+        }
+    }
+
+    return wallMask;
+}
+
 // 洪水填充演算法
 int bfsFill(int width, int height, int seedX, int seedY,
             const std::vector<uint8_t>& passableMask,
@@ -227,7 +313,8 @@ bool findNearestPassable(int& sx, int& sy, int width, int height,
 std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
                                            const std::vector<RGB>& pathColors,
                                            int pathTolSq,
-                                           int closingKernelSize, int wallThicken) {
+                                           int closingKernelSize, int wallThicken,
+                                           const std::vector<uint8_t>& wallMask = {}) {
     int total = width * height;
     std::vector<uint8_t> mask(total, 0);
 
@@ -242,7 +329,7 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     }
 
     if (closingKernelSize > 1) {
-        dilate(mask, width, height, closingKernelSize);
+        dilateWithBarrier(mask, wallMask, width, height, closingKernelSize);
         erode(mask, width, height, closingKernelSize);
     }
     if (wallThicken > 0) {
@@ -251,36 +338,37 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     return mask;
 }
 
-std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
-                                           const std::vector<RGB>& pathColors,
-                                           float hslTolerance,
-                                           int closingKernelSize, int wallThicken) {
-    int total = width * height;
-    std::vector<uint8_t> mask(total, 0);
+// std::vector<uint8_t> buildPassableMaskHSL(int width, int height,
+//                                            const std::vector<RGB>& pathColors,
+//                                            float hslTolerance,
+//                                            int closingKernelSize, int wallThicken,
+//                                            const std::vector<uint8_t>& wallMask = {}) {
+//     int total = width * height;
+//     std::vector<uint8_t> mask(total, 0);
 
-    std::vector<HSL> protoHSL;
-    protoHSL.reserve(pathColors.size());
-    for (auto& c : pathColors) protoHSL.push_back(rgbtohsl(c.r, c.g, c.b));
+//     std::vector<HSL> protoHSL;
+//     protoHSL.reserve(pathColors.size());
+//     for (auto& c : pathColors) protoHSL.push_back(rgbtohsl(c.r, c.g, c.b));
 
-    for (int i = 0; i < total; i++) {
-        HSL px = rgbtohsl(mapBuffer[i*4], mapBuffer[i*4+1], mapBuffer[i*4+2]);
-        for (auto& ph : protoHSL) {
-            if (hslDist(px, ph) <= hslTolerance) {
-                mask[i] = 1;
-                break;
-            }
-        }
-    }
+//     for (int i = 0; i < total; i++) {
+//         HSL px = rgbtohsl(mapBuffer[i*4], mapBuffer[i*4+1], mapBuffer[i*4+2]);
+//         for (auto& ph : protoHSL) {
+//             if (hslDist(px, ph) <= hslTolerance * hslTolerance) {
+//                 mask[i] = 1;
+//                 break;
+//             }
+//         }
+//     }
 
-    if (closingKernelSize > 1) {
-        dilate(mask, width, height, closingKernelSize);
-        erode(mask, width, height, closingKernelSize);
-    }
-    if (wallThicken > 0) {
-        erode(mask, width, height, wallThicken * 2 + 1);
-    }
-    return mask;
-}
+//     if (closingKernelSize > 1) {
+//         dilateWithBarrier(mask, wallMask, width, height, closingKernelSize);
+//         erode(mask, width, height, closingKernelSize);
+//     }
+//     if (wallThicken > 0) {
+//         erode(mask, width, height, wallThicken * 2 + 1);
+//     }
+//     return mask;
+// }
 
 
 
@@ -324,48 +412,58 @@ void removeSmallMaskComponents(std::vector<uint8_t>& mask,
 }
 
 // mode: 0 = RGB 容差（色塊圖），1 = HSL（線稿圖）。
-// normalizelighting 為保留參數，目前未使用。
-// denoiseMinArea > 0 時清除遮罩中面積過小的連通域。
+//   對深色像素做 8 連通域分析，包圍盒最大跨度 < spanThreshold 的視為文字排除，
+//   其餘（真牆壁）列入屏障，dilate 時不得越過。設為 0 等同舊行為（無屏障）。
 void intelligentFloodFill(int width, int height,
                            int seedX, int seedY,
                            int pathColorTolerance,
                            int closingKernelSize,
                            int wallThicken,
                            int sampleRadius,
-                           int mode,
-                           int normalizelighting,
-                           int denoiseMinArea) {
+                           int denoiseMinArea,
+                           int spanThreshold) {
     if (mapBuffer == nullptr) return;
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
 
+    // 以深色像素的 8 連通域跨度區分「文字」與「牆壁」，建立絕對屏障遮罩。
+    // darkThreshold = 128：亮度低於 128 的像素視為深色（足以同時涵蓋文字與細牆）。
+    const uint8_t DARK_THRESHOLD = 128;
+    std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
+
     std::vector<uint8_t> mask;
 
-    if (mode == 1) {
-        int quantShift = 2;
-        int topK = 2;
-        auto pathColors = sampleDominantColors(seedX, seedY, width, height,
-                                                sampleRadius, quantShift, topK);
-        float hslTol;
-        if (pathColorTolerance <= 40) {
-            float t = (float)(pathColorTolerance - 10) / 30.0f;
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            hslTol = 0.04f + t * 0.06f;
-        } else {
-            float t = (float)(pathColorTolerance - 40) / 30.0f;
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            hslTol = 0.10f + t * 0.10f;
-        }
-        mask = buildPassableMaskHSL(width, height, pathColors, hslTol,
-                                     closingKernelSize, wallThicken);
-    } else {
-        auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+    // if (mode == 1) {
+    //     int quantShift = 2;
+    //     int topK = 2;
+    //     auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+    //                                             sampleRadius, quantShift, topK);
+    //     float hslTol;
+    //     if (pathColorTolerance <= 40) {
+    //         float t = (float)(pathColorTolerance - 10) / 30.0f;
+    //         if (t < 0.0f) t = 0.0f;
+    //         if (t > 1.0f) t = 1.0f;
+    //         hslTol = 0.04f + t * 0.06f;
+    //     } else {
+    //         float t = (float)(pathColorTolerance - 40) / 30.0f;
+    //         if (t < 0.0f) t = 0.0f;
+    //         if (t > 1.0f) t = 1.0f;
+    //         hslTol = 0.10f + t * 0.10f;
+    //     }
+    //     mask = buildPassableMaskHSL(width, height, pathColors, hslTol,
+    //                                  closingKernelSize, wallThicken, wallMask);
+    // } else {
+    //     auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+    //                                             sampleRadius, 3, 1);
+    //     int tolSq = pathColorTolerance * pathColorTolerance;
+    //     mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
+    //                                  closingKernelSize, wallThicken, wallMask);
+    // }
+
+    auto pathColors = sampleDominantColors(seedX, seedY, width, height,
                                                 sampleRadius, 3, 1);
         int tolSq = pathColorTolerance * pathColorTolerance;
         mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
-                                     closingKernelSize, wallThicken);
-    }
+                                     closingKernelSize, wallThicken, wallMask);
 
     if (denoiseMinArea > 0) {
         removeSmallMaskComponents(mask, width, height, denoiseMinArea);
