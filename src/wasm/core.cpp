@@ -498,7 +498,7 @@ void intelligentFloodFill(int width, int height,
         }
     }
     mask = seedMask;
-    bfsFill(width, height, sx, sy, mask, true);
+    bfsFill(width, height, sx, sy, mask, true); // 渲染出可行走區域
     g_passableMask = mask;
     g_maskWidth    = width;
     g_maskHeight   = height;
