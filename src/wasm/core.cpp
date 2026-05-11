@@ -202,11 +202,13 @@ std::vector<uint8_t> buildWallMask(int width, int height,
     int total = width * height;
     wallMask.assign(total, 0);
 
-    // 標記深色像素
+    // 標記深色像素：必須同時是「暗」且「低彩度」，避免紅色箭頭等彩色像素被誤抓
     std::vector<bool> isDark(total, false);
     for (int i = 0; i < total; i++) {
-        int brightness = ((int)mapBuffer[i*4] + mapBuffer[i*4+1] + mapBuffer[i*4+2]) / 3;
-        if (brightness < (int)darkThreshold) isDark[i] = true;
+        int r = mapBuffer[i*4], g = mapBuffer[i*4+1], b = mapBuffer[i*4+2];
+        int brightness = (r + g + b) / 3;
+        int chroma = std::max({r, g, b}) - std::min({r, g, b});
+        if (brightness < (int)darkThreshold && chroma < 30) isDark[i] = true;
     }
 
     // 8 連通域 BFS
