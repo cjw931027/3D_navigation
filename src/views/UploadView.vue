@@ -505,27 +505,6 @@ const goToProcess = () => router.push('/path')
         {{ mapStore.pathColor.b }})
       </div>
     </div>
-    <!--
-    <div class="map-type-row" v-if="mapStore.imageRawData">
-      <span class="type-label">地圖類型</span>
-      <div class="type-toggle">
-        <button
-          class="btn-type"
-          :class="{ active: mapStore.mapType === 'color-block' }"
-          @click="mapStore.setMapType('color-block')"
-        >
-          色塊圖
-        </button>
-        <button
-          class="btn-type"
-          :class="{ active: mapStore.mapType === 'line-art' }"
-          @click="mapStore.setMapType('line-art')"
-        >
-          線稿圖
-        </button>
-      </div>
-    </div>
-    -->
     <div
       class="upload-card"
       :class="{
@@ -967,18 +946,6 @@ canvas {
   color: var(--color-danger-dark);
 }
 
-/* 地圖類型列 */
-/*
-.map-type-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: var(--space-3);
-  font-size: var(--text-base);
-}
-*/
 .type-label {
   color: var(--color-text-muted);
   font-weight: var(--font-semibold);
@@ -1120,13 +1087,6 @@ canvas {
     font-weight: var(--font-semibold);
   }
 
-  /*
-  .map-type-row {
-    align-items: stretch;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-*/
   .type-toggle {
     display: grid;
     grid-template-columns: 1fr 1fr;
