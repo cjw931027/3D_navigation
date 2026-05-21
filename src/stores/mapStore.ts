@@ -381,7 +381,6 @@ export const useMapStore = defineStore('map', () => {
 
   function setMapType(type: MapType) {
     mapType.value = type
-    // upscaleFactor.value = type === 'line-art' ? LINE_ART_UPSCALE : 1
     upscaleFactor.value = 1
     clearDerivedResults()
     applyComputed()
@@ -389,7 +388,6 @@ export const useMapStore = defineStore('map', () => {
 
   function applyComputed() {
     const p = computeParams(mapMode.value, sensitivity.value)
-    // if (mapType.value === 'line-art') p.wallThicken = 0
     floodFillParams.value = p
   }
 
