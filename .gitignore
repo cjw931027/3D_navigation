@@ -38,6 +38,4 @@ __screenshots__/
 # Vite
 *.timestamp-*-*.mjs
 
-# Claude Code
-.claude/
-CLAUDE.md
+change-records/*
