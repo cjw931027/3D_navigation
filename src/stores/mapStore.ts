@@ -19,6 +19,7 @@ export interface FloodFillParams {
   closingKernelSize: number
   wallThicken: number
   sampleRadius: number
+  spanThreshold: number
 }
 
 export type MapMode = 'indoor'
@@ -34,7 +35,7 @@ export interface Landmark {
 
 export type PositioningMode = 'manual' | 'inertial' | 'ar'
 
-export type MapType = 'color-block' | 'line-art'
+export type MapType = 'color-block' // | 'line-art'
 
 interface ModeRange {
   defaultSensitivity: number
@@ -42,6 +43,7 @@ interface ModeRange {
   closingKernelSize: [number, number]
   wallThicken: [number, number]
   sampleRadius: [number, number]
+  spanThreshold: [number, number]
 }
 
 const MODE_RANGE: Record<MapMode, ModeRange> = {
@@ -51,6 +53,7 @@ const MODE_RANGE: Record<MapMode, ModeRange> = {
     closingKernelSize: [3, 9],
     wallThicken: [0, 2],
     sampleRadius: [5, 12],
+    spanThreshold: [80, 80], 
   },
 }
 
@@ -65,7 +68,7 @@ function lerpOdd(a: number, b: number, t: number): number {
 }
 
 // 線稿圖送 WASM 前先 2x 上採樣，避免窄走廊被 closing/erode 消除。
-const LINE_ART_UPSCALE = 2
+// const LINE_ART_UPSCALE = 2
 
 function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
   const r = MODE_RANGE[mode]
@@ -86,6 +89,7 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     closingKernelSize,
     wallThicken,
     sampleRadius: lerp(r.sampleRadius[0], r.sampleRadius[1], t),
+    spanThreshold: lerp(r.spanThreshold[0], r.spanThreshold[1], t),
   }
 }
 
@@ -377,15 +381,15 @@ export const useMapStore = defineStore('map', () => {
 
   function setMapType(type: MapType) {
     mapType.value = type
-    upscaleFactor.value = type === 'line-art' ? LINE_ART_UPSCALE : 1
+    // upscaleFactor.value = type === 'line-art' ? LINE_ART_UPSCALE : 1
+    upscaleFactor.value = 1
     clearDerivedResults()
     applyComputed()
   }
 
   function applyComputed() {
     const p = computeParams(mapMode.value, sensitivity.value)
-    // 線稿圖走廊本身就窄，erode 會切斷；強制關閉牆壁加厚。
-    if (mapType.value === 'line-art') p.wallThicken = 0
+    // if (mapType.value === 'line-art') p.wallThicken = 0
     floodFillParams.value = p
   }
 
