@@ -37,7 +37,7 @@ export interface Landmark {
 
 export type PositioningMode = 'manual' | 'inertial' | 'ar'
 
-export type MapType = 'color-block' // | 'line-art'
+export type MapType = 'color-block' 
 
 interface ModeRange {
   defaultSensitivity: number
@@ -55,7 +55,7 @@ const MODE_RANGE: Record<MapMode, ModeRange> = {
     closingKernelSize: [3, 9],
     wallThicken: [0, 2],
     sampleRadius: [5, 12],
-    spanThreshold: [80, 80], 
+    spanThreshold: [20, 40],  // 可辨識為牆壁之長度range
   },
 }
 
@@ -98,6 +98,7 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     smoothMinWallArea: 20,
   }
 }
+
 
 // 驗證節點序列每一條相鄰段在 mask 上的 Bresenham 連線全為 passable。
 // 任一格在牆內或出界即視為無效，用於在後處理失敗時降級。
