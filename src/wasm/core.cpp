@@ -417,7 +417,7 @@ void intelligentFloodFill(int width, int height,
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
 
     // 以深色像素的 8 連通域跨度區分「文字」與「牆壁」，建立絕對屏障遮罩。
-    // darkThreshold = 128：亮度低於 128 的像素視為深色（足以同時涵蓋文字與細牆）。
+    // darkThreshold = 140：亮度低於 140 的像素視為深色（足以同時涵蓋文字與細牆）。
     const uint8_t DARK_THRESHOLD = 128;
     std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
 
