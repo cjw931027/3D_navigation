@@ -308,6 +308,59 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     return mask;
 }
 
+// 對 passableMask 做 closing（dilate→erode）填補走廊內被誤判為牆的小洞（小字、圖示等）。
+// dilate 階段一律不可覆蓋 wallMask 中的真牆；erode 階段純粹收縮可走區、不會吃到牆，無需 barrier。
+void closeSmallHolesWithBarrier(std::vector<uint8_t>& mask,
+                                 const std::vector<uint8_t>& wallMask,
+                                 int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    dilateWithBarrier(mask, wallMask, width, height, kSize);
+    erode(mask, width, height, kSize);
+}
+
+// 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起
+// 會被視為可走。但若該連通域有任一格屬於 wallMask，整塊都保留（屬於真牆延伸）。
+void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
+                                          const std::vector<uint8_t>& wallMask,
+                                          int width, int height, int minArea) {
+    if (minArea <= 0) return;
+    int total = width * height;
+    std::vector<bool> visited(total, false);
+
+    const int dx4[] = {0, 0, -1, 1};
+    const int dy4[] = {-1, 1,  0, 0};
+
+    for (int start = 0; start < total; start++) {
+        if (visited[start] || mask[start] == 1) continue;
+
+        std::vector<int> component;
+        std::vector<int> queue;
+        queue.push_back(start);
+        visited[start] = true;
+        bool touchesWall = false;
+
+        for (int head = 0; head < (int)queue.size(); head++) {
+            int cur = queue[head];
+            component.push_back(cur);
+            if (!wallMask.empty() && wallMask[cur] == 1) touchesWall = true;
+            int cx = cur % width, cy = cur / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx4[d], ny = cy + dy4[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && mask[ni] == 0) {
+                    visited[ni] = true;
+                    queue.push_back(ni);
+                }
+            }
+        }
+
+        if (!touchesWall && (int)component.size() < minArea) {
+            for (int idx : component) mask[idx] = 1;
+        }
+    }
+}
+
 // 清除遮罩中面積小於 minArea 的孤立連通域，避免雜訊碎塊干擾 A*。
 void removeSmallMaskComponents(std::vector<uint8_t>& mask,
                                 int width, int height, int minArea) {
@@ -357,7 +410,9 @@ void intelligentFloodFill(int width, int height,
                            int wallThicken,
                            int sampleRadius,
                            int denoiseMinArea,
-                           int spanThreshold) {
+                           int spanThreshold,
+                           int smoothClosingSize,
+                           int smoothMinWallArea) {
     if (mapBuffer == nullptr) return;
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
 
@@ -405,6 +460,16 @@ void intelligentFloodFill(int width, int height,
         }
     }
     mask = seedMask;
+
+    // 平滑階段：清理走廊內小黑點 / 邊緣鋸齒。所有「牆 → 可走」翻轉都受 wallMask 屏障保護，
+    // 確保 buildWallMask 認定的真牆壁不會被吃掉。順序：先 closing 補小洞 → 再清孤立小牆塊。
+    if (smoothClosingSize > 1) {
+        closeSmallHolesWithBarrier(mask, wallMask, width, height, smoothClosingSize);
+    }
+    if (smoothMinWallArea > 0) {
+        removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea);
+    }
+
     bfsFill(width, height, sx, sy, mask, true); // 渲染出可行走區域
     g_passableMask = mask;
     g_maskWidth    = width;

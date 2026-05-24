@@ -170,6 +170,13 @@ const runFloodFill = () => {
     // const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
     const modeInt = 0
     const denoiseArea = mapStore.denoiseMinArea * up * up
+    // smooth* 參數隨上採樣比例縮放：closing kernel 維持奇數（保 dilate/erode 對稱），
+    // 牆塊面積閾值以 up² 倍率擴張（與 denoiseArea 同一個邏輯）。
+    const smoothClose = (() => {
+      const v = Math.round(p.smoothClosingSize * up)
+      return v <= 1 ? 0 : v % 2 === 0 ? v + 1 : v
+    })()
+    const smoothMinWall = p.smoothMinWallArea * up * up
     mapStore.wasmModule.intelligentFloodFill(
       W2,
       H2,
@@ -181,6 +188,8 @@ const runFloodFill = () => {
       p.sampleRadius,
       denoiseArea,
       p.spanThreshold,
+      smoothClose,
+      smoothMinWall,
     )
 
     // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
@@ -411,6 +420,50 @@ const runAStarOnly = () => {
               />
               <span class="toggle-hint"
                 >BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉</span
+              >
+            </div>
+
+            <div class="param-row">
+              <div class="param-label">
+                <span class="param-name">平滑：補洞核大小</span>
+                <strong>{{ mapStore.floodFillParams.smoothClosingSize }}</strong>
+              </div>
+              <input
+                type="range"
+                :value="mapStore.floodFillParams.smoothClosingSize"
+                @input="
+                  mapStore.setFloodFillParams({
+                    smoothClosingSize: Number(($event.target as HTMLInputElement).value),
+                  })
+                "
+                min="1"
+                max="9"
+                step="2"
+              />
+              <span class="toggle-hint"
+                >走廊內小字 / 圖示形成的小洞會被填補；偵測到的真牆（buildWallMask）絕不會被覆蓋。設為 1 可關閉</span
+              >
+            </div>
+
+            <div class="param-row">
+              <div class="param-label">
+                <span class="param-name">平滑：孤立小牆面積</span>
+                <strong>{{ mapStore.floodFillParams.smoothMinWallArea }}</strong>
+              </div>
+              <input
+                type="range"
+                :value="mapStore.floodFillParams.smoothMinWallArea"
+                @input="
+                  mapStore.setFloodFillParams({
+                    smoothMinWallArea: Number(($event.target as HTMLInputElement).value),
+                  })
+                "
+                min="0"
+                max="100"
+                step="5"
+              />
+              <span class="toggle-hint"
+                >走廊內面積小於此值的孤立黑點 / 鋸齒突起會被翻為可走；接觸到真牆的塊一律保留。設為 0 可關閉</span
               >
             </div>
           </div>
