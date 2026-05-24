@@ -1,39 +1,30 @@
 #include <emscripten/bind.h>
-#include <iostream>
-#include <cstdlib> 
+#include <cstdlib>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <unordered_map>
+#include <queue>
+#include <functional>
 
 using namespace emscripten;
 
-// 這是一個全域指標，用來記錄我們跟系統借了哪一塊記憶體來放圖片
 uint8_t* mapBuffer = nullptr;
 
-// 1. 開闢記憶體 (讓 JS 呼叫)
-// JS 告訴我們圖片有多大，我們就去借多大的空間，然後把「地址(指標)」還給 JS
+// intelligentFloodFill 建好的遮罩保留給後續 runAStar 使用。
+static std::vector<uint8_t>  g_passableMask;
+static int                   g_maskWidth  = 0;
+static int                   g_maskHeight = 0;
+
+// 路徑以 x0,y0,x1,y1,... 交錯存放，JS 以 Int32Array 讀取。
+static std::vector<int32_t>  g_pathBuffer;
+
 int allocateMemory(int size) {
-    if (mapBuffer != nullptr) {
-        free(mapBuffer); // 如果之前借過，先還回去，避免記憶體爆掉
-    }
-    // malloc: 向系統要求分配 size 大小的記憶體
+    if (mapBuffer != nullptr) free(mapBuffer);
     mapBuffer = (uint8_t*)malloc(size);
-    
-    // 把記憶體地址 (Pointer) 轉成整數回傳給 JS
     return (int)mapBuffer;
 }
 
-// 2. C++ 高速影像處理測試：把整張圖片變成「反色 (負片)」
-void invertColors(int size) {
-    if (mapBuffer == nullptr) return; // 安全檢查
-
-    // 圖片陣列的結構是 [R, G, B, A, R, G, B, A...]，每 4 個數字是一個像素
-    for (int i = 0; i < size; i += 4) {
-        mapBuffer[i]     = 255 - mapBuffer[i];     // R (紅色反轉)
-        mapBuffer[i + 1] = 255 - mapBuffer[i + 1]; // G (綠色反轉)
-        mapBuffer[i + 2] = 255 - mapBuffer[i + 2]; // B (藍色反轉)
-        // mapBuffer[i + 3] 是透明度 (A)，我們不更動它
-    }
-}
-
-// 3. 釋放記憶體 
 void freeMemory() {
     if (mapBuffer != nullptr) {
         free(mapBuffer);
@@ -41,8 +32,568 @@ void freeMemory() {
     }
 }
 
+// 計算兩個RGB顏色的差異程度，歐幾里得距離平方，省略開根號
+inline int colorDistSq(uint8_t r1, uint8_t g1, uint8_t b1,
+                        uint8_t r2, uint8_t g2, uint8_t b2) {
+    int dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
+    return dr*dr + dg*dg + db*db;
+}
+
+struct RGB { uint8_t r, g, b; };
+
+struct HSL { float h, s, l; };
+
+// 依照點選的種子點搜索周圍radius內最常出現的顏色，當作真正的種子點，以防點錯(採色半徑)
+std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
+                                       int radius, int quantShift, int topK) {
+    std::unordered_map<uint32_t, int> freq;
+    int totalSamples = 0;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int i = (ny * width + nx) * 4;
+            uint8_t r = (mapBuffer[i]   >> quantShift) << quantShift;
+            uint8_t g = (mapBuffer[i+1] >> quantShift) << quantShift;
+            uint8_t b = (mapBuffer[i+2] >> quantShift) << quantShift;
+            uint32_t key = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            freq[key]++;
+            totalSamples++;
+        }
+    }
+
+    int minCount = std::max(1, totalSamples / 10);
+    std::vector<std::pair<int, uint32_t>> sorted;
+    sorted.reserve(freq.size());
+    for (auto& kv : freq) {
+        if (kv.second >= minCount)
+            sorted.push_back({ kv.second, kv.first });
+    }
+    std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) {
+        return a.first > b.first;
+    });
+
+    std::vector<RGB> result;
+    int k = std::min(topK, (int)sorted.size());
+    for (int i = 0; i < k; i++) {
+        uint32_t c = sorted[i].second;
+        result.push_back({
+            (uint8_t)((c >> 16) & 0xFF),
+            (uint8_t)((c >>  8) & 0xFF),
+            (uint8_t)( c        & 0xFF)
+        });
+    }
+    if (result.empty()) {
+        uint32_t best = 0; int bestCount = 0;
+        for (auto& kv : freq)
+            if (kv.second > bestCount) { bestCount = kv.second; best = kv.first; }
+        result.push_back({
+            (uint8_t)((best >> 16) & 0xFF),
+            (uint8_t)((best >>  8) & 0xFF),
+            (uint8_t)( best        & 0xFF)
+        });
+    }
+    return result;
+}
+
+// 將最後兩個變數固定，quantShift是把相近的顏色歸類成同一類，設定為3代表使用位元運算(較快)，會同時同除8再乘8
+// topK是指選擇最前面幾個點當作種子點，設定為1就是第一多的當種子點
+RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
+    auto colors = sampleDominantColors(cx, cy, width, height, radius, 3, 1);
+    return colors[0];
+}
+
+// 斷點填補功能，對每個kSize的正方形，如果正方形中有1代表可以走，那就將所有正方形的值設為可以走
+// 因為是要偵測牆壁周圍有沒有可行走區域，所以會比較多牆壁，使用if先判斷可以減少時間
+void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++)
+        for (int x = half; x < width - half; x++)
+            if (mask[y*width + x] == 1)
+                for (int ky = -half; ky <= half; ky++)
+                    for (int kx = -half; kx <= half; kx++)
+                        result[(y+ky)*width + (x+kx)] = 1;
+    mask = result;
+}
+
+
+// 將斷點填補的點填回去，以及牆壁加厚
+// 因為是在牆壁附近判斷kSize周圍有沒有牆壁，很容易就有牆壁，所以判斷如果有牆壁就停止迴圈，也是會減少時間
+void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++) {
+        for (int x = half; x < width - half; x++) {
+            bool allOne = true;
+            for (int ky = -half; ky <= half && allOne; ky++)
+                for (int kx = -half; kx <= half && allOne; kx++)
+                    if (mask[(y+ky)*width + (x+kx)] == 0) allOne = false;
+            result[y*width + x] = allOne ? 1 : 0;
+        }
+    }
+    mask = result;
+}
+
+// 帶屏障的膨脹：與 dilate 相同，但膨脹時絕不覆蓋 wallMask 中標記為牆的像素。
+// 空的 wallMask 代表功能停用，等同原本的 dilate。
+void dilateWithBarrier(std::vector<uint8_t>& mask, const std::vector<uint8_t>& wallMask,
+                        int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    if (wallMask.empty()) { dilate(mask, width, height, kSize); return; }
+    std::vector<uint8_t> result = mask;
+    int half = kSize / 2;
+    for (int y = half; y < height - half; y++)
+        for (int x = half; x < width - half; x++)
+            if (mask[y*width + x] == 1)
+                for (int ky = -half; ky <= half; ky++)
+                    for (int kx = -half; kx <= half; kx++) {
+                        int ni = (y+ky)*width + (x+kx);
+                        if (wallMask[ni] == 0) // 只有非牆像素才允許膨脹
+                            result[ni] = 1;
+                    }
+    mask = result;
+}
+
+// 建立「絕對屏障遮罩」：
+//   1. 以 darkThreshold 過濾出深色（文字＋牆壁）像素。
+//   2. 對深色像素做 8 連通域 BFS，計算包圍盒最大跨度 maxSpan。
+//   3. maxSpan >= spanThreshold 者視為真牆壁，加入 wallMask；否則視為文字，排除。
+// spanThreshold = 0 表示停用，回傳空向量（呼叫方會 fallback 到無屏障 dilate）。
+std::vector<uint8_t> buildWallMask(int width, int height,
+                                    uint8_t darkThreshold, int spanThreshold) {
+    std::vector<uint8_t> wallMask; 
+    if (spanThreshold <= 0) return wallMask;
+
+    int total = width * height;
+    wallMask.assign(total, 0);
+
+    // 標記深色像素：必須同時是「暗」且「低彩度」，避免紅色箭頭等彩色像素被誤抓
+    std::vector<bool> isDark(total, false);
+    for (int i = 0; i < total; i++) {
+        int r = mapBuffer[i*4], g = mapBuffer[i*4+1], b = mapBuffer[i*4+2];
+        int brightness = (r + g + b) / 3;
+        int chroma = std::max({r, g, b}) - std::min({r, g, b});
+        if (brightness < (int)darkThreshold && chroma < 30) isDark[i] = true;
+    }
+
+    // 8 連通域 BFS
+    std::vector<bool> visited(total, false);
+    const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy8[] = {-1, -1, -1,  0, 0,  1, 1, 1};
+
+    std::vector<int> queue;
+    queue.reserve(512);
+
+    for (int start = 0; start < total; start++) {
+        if (!isDark[start] || visited[start]) continue;
+
+        queue.clear();
+        queue.push_back(start);
+        visited[start] = true;
+
+        int minX = start % width, maxX = minX;
+        int minY = start / width, maxY = minY;
+        int head = 0;
+
+        while (head < (int)queue.size()) {
+            int cur = queue[head++];
+            int cx = cur % width, cy = cur / width;
+            if (cx < minX) minX = cx;
+            if (cx > maxX) maxX = cx;
+            if (cy < minY) minY = cy;
+            if (cy > maxY) maxY = cy;
+
+            for (int d = 0; d < 8; d++) {
+                int nx = cx + dx8[d], ny = cy + dy8[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && isDark[ni]) {
+                    visited[ni] = true;
+                    queue.push_back(ni);
+                }
+            }
+        }
+        int maxSpan = std::max(maxX - minX, maxY - minY);
+        if (maxSpan >= spanThreshold) {
+            for (int idx : queue) wallMask[idx] = 1;
+        }
+    }
+
+    return wallMask;
+}
+
+// 洪水填充演算法
+int bfsFill(int width, int height, int seedX, int seedY,
+            const std::vector<uint8_t>& passableMask,
+            bool doColor) {
+    if (passableMask[seedY * width + seedX] == 0) return 0;
+
+    std::vector<bool> visited(width * height, false);
+    std::vector<int> qX, qY;
+    qX.reserve(width * height / 4);
+    qY.reserve(width * height / 4);
+    qX.push_back(seedX);
+    qY.push_back(seedY);
+    visited[seedY * width + seedX] = true;
+
+    const int dx[] = {0, 0, -1, 1};
+    const int dy[] = {-1, 1, 0, 0};
+    int head = 0, count = 0;
+
+    while (head < (int)qX.size()) {
+        int cx = qX[head], cy = qY[head++];
+        count++;
+        if (doColor) {
+            int pi = (cy * width + cx) * 4;
+            mapBuffer[pi]   = 0;
+            mapBuffer[pi+1] = 200;
+            mapBuffer[pi+2] = 255;
+        }
+        for (int i = 0; i < 4; i++) {
+            int nx = cx + dx[i], ny = cy + dy[i];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            int ni = ny * width + nx;
+            if (!visited[ni] && passableMask[ni] == 1) {
+                visited[ni] = true;
+                qX.push_back(nx);
+                qY.push_back(ny);
+            }
+        }
+    }
+    return count;
+}
+
+// 防止使用者起訖點點到牆壁
+bool findNearestPassable(int& sx, int& sy, int width, int height,
+                         const std::vector<uint8_t>& mask, int searchR = 12) {
+    if (mask[sy * width + sx] == 1) return true;
+    for (int r = 1; r <= searchR; r++)
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                int nx = sx + dx, ny = sy + dy;
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                    if (mask[ny * width + nx] == 1) { sx = nx; sy = ny; return true; }
+            }
+    return false;
+}
+
+std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
+                                           const std::vector<RGB>& pathColors,
+                                           int pathTolSq,
+                                           int closingKernelSize, int wallThicken,
+                                           const std::vector<uint8_t>& wallMask = {}) {
+    int total = width * height;
+    std::vector<uint8_t> mask(total, 0);
+
+    for (int i = 0; i < total; i++) {
+        uint8_t pr = mapBuffer[i*4], pg = mapBuffer[i*4+1], pb = mapBuffer[i*4+2];
+        for (auto& c : pathColors) {
+            if (colorDistSq(pr, pg, pb, c.r, c.g, c.b) <= pathTolSq) {
+                mask[i] = 1;
+                break;
+            }
+        }
+    }
+
+    if (closingKernelSize > 1) {
+        dilateWithBarrier(mask, wallMask, width, height, closingKernelSize);
+        erode(mask, width, height, closingKernelSize);
+    }
+    if (wallThicken > 0) {
+        erode(mask, width, height, wallThicken * 2 + 1);
+    }
+    return mask;
+}
+
+// 對 passableMask 做 closing（dilate→erode）填補走廊內被誤判為牆的小洞（小字、圖示等）。
+// dilate 階段一律不可覆蓋 wallMask 中的真牆；erode 階段純粹收縮可走區、不會吃到牆，無需 barrier。
+void closeSmallHolesWithBarrier(std::vector<uint8_t>& mask,
+                                 const std::vector<uint8_t>& wallMask,
+                                 int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    dilateWithBarrier(mask, wallMask, width, height, kSize);
+    erode(mask, width, height, kSize);
+}
+
+// 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起
+// 會被視為可走。但若該連通域有任一格屬於 wallMask，整塊都保留（屬於真牆延伸）。
+void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
+                                          const std::vector<uint8_t>& wallMask,
+                                          int width, int height, int minArea) {
+    if (minArea <= 0) return;
+    int total = width * height;
+    std::vector<bool> visited(total, false);
+
+    const int dx4[] = {0, 0, -1, 1};
+    const int dy4[] = {-1, 1,  0, 0};
+
+    for (int start = 0; start < total; start++) {
+        if (visited[start] || mask[start] == 1) continue;
+
+        std::vector<int> component;
+        std::vector<int> queue;
+        queue.push_back(start);
+        visited[start] = true;
+        bool touchesWall = false;
+
+        for (int head = 0; head < (int)queue.size(); head++) {
+            int cur = queue[head];
+            component.push_back(cur);
+            if (!wallMask.empty() && wallMask[cur] == 1) touchesWall = true;
+            int cx = cur % width, cy = cur / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx4[d], ny = cy + dy4[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && mask[ni] == 0) {
+                    visited[ni] = true;
+                    queue.push_back(ni);
+                }
+            }
+        }
+
+        if (!touchesWall && (int)component.size() < minArea) {
+            for (int idx : component) mask[idx] = 1;
+        }
+    }
+}
+
+// 清除遮罩中面積小於 minArea 的孤立連通域，避免雜訊碎塊干擾 A*。
+void removeSmallMaskComponents(std::vector<uint8_t>& mask,
+                                int width, int height, int minArea) {
+    int total = width * height;
+    std::vector<bool> visited(total, false);
+
+    const int dx4[] = {0, 0, -1, 1};
+    const int dy4[] = {-1, 1,  0, 0};
+
+    for (int start = 0; start < total; start++) {
+        if (visited[start] || mask[start] == 0) continue;
+
+        std::vector<int> component;
+        std::vector<int> queue;
+        queue.reserve(minArea * 2);
+        queue.push_back(start);
+        visited[start] = true;
+
+        for (int head = 0; head < (int)queue.size(); head++) {
+            int cur = queue[head];
+            component.push_back(cur);
+            int cx = cur % width, cy = cur / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx4[d], ny = cy + dy4[d];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int ni = ny * width + nx;
+                if (!visited[ni] && mask[ni] == 1) {
+                    visited[ni] = true;
+                    queue.push_back(ni);
+                }
+            }
+        }
+
+        if ((int)component.size() < minArea) {
+            for (int idx : component) mask[idx] = 0;
+        }
+    }
+}
+
+// mode: 0 = RGB 容差（色塊圖），1 = HSL（線稿圖）。
+//   對深色像素做 8 連通域分析，包圍盒最大跨度 < spanThreshold 的視為文字排除，
+//   其餘（真牆壁）列入屏障，dilate 時不得越過。設為 0 等同舊行為（無屏障）。
+void intelligentFloodFill(int width, int height,
+                           int seedX, int seedY,
+                           int pathColorTolerance,
+                           int closingKernelSize,
+                           int wallThicken,
+                           int sampleRadius,
+                           int denoiseMinArea,
+                           int spanThreshold,
+                           int smoothClosingSize,
+                           int smoothMinWallArea) {
+    if (mapBuffer == nullptr) return;
+    if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
+
+    // 以深色像素的 8 連通域跨度區分「文字」與「牆壁」，建立絕對屏障遮罩。
+    // darkThreshold = 140：亮度低於 140 的像素視為深色（足以同時涵蓋文字與細牆）。
+    const uint8_t DARK_THRESHOLD = 128;
+    std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
+
+    std::vector<uint8_t> mask;
+
+    auto pathColors = sampleDominantColors(seedX, seedY, width, height,
+                                                sampleRadius, 3, 1);
+        int tolSq = pathColorTolerance * pathColorTolerance;
+        mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
+                                     closingKernelSize, wallThicken, wallMask);
+
+    if (denoiseMinArea > 0) {
+        removeSmallMaskComponents(mask, width, height, denoiseMinArea);
+    }
+
+    int searchR = 12 + wallThicken * 3;
+    int sx = seedX, sy = seedY;
+    if (!findNearestPassable(sx, sy, width, height, mask, searchR)) return;
+
+    // 先做 connected-component 限制:只保留種子點的連通分量
+    std::vector<uint8_t> seedMask(mask.size(), 0);
+    if (mask[sy * width + sx] == 1) {
+        std::vector<int> q;
+        q.push_back(sy * width + sx);
+        seedMask[sy * width + sx] = 1;
+        const int dx[] = {0,0,-1,1};
+        const int dy[] = {-1,1,0,0};
+        for (int h = 0; h < (int)q.size(); h++) {
+            int idx = q[h];
+            int cx = idx % width, cy = idx / width;
+            for (int d = 0; d < 4; d++) {
+                int nx = cx + dx[d], ny = cy + dy[d];
+                if (nx<0||nx>=width||ny<0||ny>=height) continue;
+                int ni = ny*width + nx;
+                if (seedMask[ni] == 0 && mask[ni] == 1) {
+                    seedMask[ni] = 1;
+                    q.push_back(ni);
+                }
+            }
+        }
+    }
+    mask = seedMask;
+
+    // 平滑階段：清理走廊內小黑點 / 邊緣鋸齒。所有「牆 → 可走」翻轉都受 wallMask 屏障保護，
+    // 確保 buildWallMask 認定的真牆壁不會被吃掉。順序：先 closing 補小洞 → 再清孤立小牆塊。
+    if (smoothClosingSize > 1) {
+        closeSmallHolesWithBarrier(mask, wallMask, width, height, smoothClosingSize);
+    }
+    if (smoothMinWallArea > 0) {
+        removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea);
+    }
+
+    bfsFill(width, height, sx, sy, mask, true); // 渲染出可行走區域
+    g_passableMask = mask;
+    g_maskWidth    = width;
+    g_maskHeight   = height;
+}
+
+int runAStar(int startX, int startY, int endX, int endY) {
+    g_pathBuffer.clear();
+
+    if (g_passableMask.empty() || g_maskWidth <= 0 || g_maskHeight <= 0) return 0;
+
+    int W = g_maskWidth, H = g_maskHeight;
+
+    int sx = startX, sy = startY;
+    int ex = endX,   ey = endY;
+    if (!findNearestPassable(sx, sy, W, H, g_passableMask, 20)) return 0;
+    if (!findNearestPassable(ex, ey, W, H, g_passableMask, 20)) return 0;
+
+    if (sx == ex && sy == ey) {
+        g_pathBuffer = { sx, sy };
+        return 1;
+    }
+
+    struct Node {
+        float f, g;
+        int   idx;
+        bool operator>(const Node& o) const { return f > o.f; }
+    };
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> openSet;
+
+    std::vector<float> gCost(W * H, 1e30f);
+    std::vector<int>   parent(W * H, -1);
+    std::vector<bool>  closed(W * H, false);
+
+    const int   DDX[8]  = {  0,  0, -1,  1, -1, -1,  1,  1 };
+    const int   DDY[8]  = { -1,  1,  0,  0, -1,  1, -1,  1 };
+    const float COST[8] = { 1.f, 1.f, 1.f, 1.f,
+                             1.41421356f, 1.41421356f, 1.41421356f, 1.41421356f };
+
+    auto heuristic = [&](int x, int y) -> float {
+        float dx = (float)std::abs(x - ex);
+        float dy = (float)std::abs(y - ey);
+        return std::max(dx, dy) + (1.41421356f - 1.0f) * std::min(dx, dy);
+    };
+
+    int startIdx = sy * W + sx;
+    int endIdx   = ey * W + ex;
+    gCost[startIdx] = 0.0f;
+    openSet.push({ heuristic(sx, sy), 0.0f, startIdx });
+
+    bool found = false;
+
+    while (!openSet.empty()) {
+        Node cur = openSet.top(); openSet.pop();
+        int ci = cur.idx;
+        if (closed[ci]) continue;
+        closed[ci] = true;
+        if (ci == endIdx) { found = true; break; }
+
+        int cx = ci % W, cy = ci / W;
+
+        for (int d = 0; d < 8; d++) {
+            int nx = cx + DDX[d], ny = cy + DDY[d];
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+            int ni = ny * W + nx;
+            if (closed[ni] || g_passableMask[ni] == 0) continue;
+
+            // 斜角不得穿越兩側牆角。
+            if (d >= 4) {
+                int sideAx = cx + DDX[d], sideAy = cy;
+                int sideBx = cx,          sideBy = cy + DDY[d];
+                if (g_passableMask[sideAy * W + sideAx] == 0 ||
+                    g_passableMask[sideBy * W + sideBx] == 0) continue;
+            }
+
+            float ng = cur.g + COST[d];
+            if (ng < gCost[ni]) {
+                gCost[ni]  = ng;
+                parent[ni] = ci;
+                openSet.push({ ng + heuristic(nx, ny), ng, ni });
+            }
+        }
+    }
+
+    if (!found) return 0;
+
+    std::vector<int32_t> reversed;
+    for (int i = endIdx; i != -1; i = parent[i]) {
+        reversed.push_back(i % W);
+        reversed.push_back(i / W);
+    }
+
+    int pairCount = (int)(reversed.size() / 2);
+    g_pathBuffer.resize(reversed.size());
+    for (int i = 0; i < pairCount; i++) {
+        g_pathBuffer[i * 2]     = reversed[(pairCount - 1 - i) * 2];      // x
+        g_pathBuffer[i * 2 + 1] = reversed[(pairCount - 1 - i) * 2 + 1];  // y
+    }
+
+    return pairCount;
+}
+
+int getPathBuffer() {
+    return (int)(intptr_t)(g_pathBuffer.data());
+}
+
+int getPathLength() {
+    return (int)(g_pathBuffer.size() / 2);
+}
+
+int getPassableMaskBuffer()  { return (int)(intptr_t)(g_passableMask.data()); }
+int getPassableMaskSize()    { return (int)g_passableMask.size(); }
+int getPassableMaskWidth()   { return g_maskWidth;  }
+int getPassableMaskHeight()  { return g_maskHeight; }
+
 EMSCRIPTEN_BINDINGS(my_module) {
-    function("allocateMemory", &allocateMemory);
-    function("invertColors", &invertColors);
-    function("freeMemory", &freeMemory);
+    function("allocateMemory",        &allocateMemory);
+    function("freeMemory",            &freeMemory);
+    function("intelligentFloodFill",  &intelligentFloodFill);
+    function("runAStar",              &runAStar);
+    function("getPathBuffer",         &getPathBuffer);
+    function("getPathLength",         &getPathLength);
+    function("getPassableMaskBuffer", &getPassableMaskBuffer);
+    function("getPassableMaskSize",   &getPassableMaskSize);
+    function("getPassableMaskWidth",  &getPassableMaskWidth);
+    function("getPassableMaskHeight", &getPassableMaskHeight);
 }
