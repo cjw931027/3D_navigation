@@ -20,6 +20,8 @@ export interface FloodFillParams {
   wallThicken: number
   sampleRadius: number
   spanThreshold: number
+  smoothClosingSize: number
+  smoothMinWallArea: number
 }
 
 export type MapMode = 'indoor'
@@ -90,6 +92,10 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     wallThicken,
     sampleRadius: lerp(r.sampleRadius[0], r.sampleRadius[1], t),
     spanThreshold: lerp(r.spanThreshold[0], r.spanThreshold[1], t),
+    // 平滑參數獨立於靈敏度：closing 補小字洞、最小牆塊面積清掉孤立小黑點。
+    // 預設保守，使用者可在進階面板微調。
+    smoothClosingSize: 3,
+    smoothMinWallArea: 20,
   }
 }
 
