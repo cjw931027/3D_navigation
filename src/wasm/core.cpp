@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <queue>
 #include <functional>
+#include <cstdint>
 
 using namespace emscripten;
 
@@ -157,14 +158,57 @@ void dilateWithBarrier(std::vector<uint8_t>& mask, const std::vector<uint8_t>& w
     mask = result;
 }
 
-// 建立「絕對屏障遮罩」：
-//   1. 以 darkThreshold 過濾出深色（文字＋牆壁）像素。
-//   2. 對深色像素做 8 連通域 BFS，計算包圍盒最大跨度 maxSpan。
-//   3. maxSpan >= spanThreshold 者視為真牆壁，加入 wallMask；否則視為文字，排除。
-// spanThreshold = 0 表示停用，回傳空向量（呼叫方會 fallback 到無屏障 dilate）。
-std::vector<uint8_t> buildWallMask(int width, int height,
-                                    uint8_t darkThreshold, int spanThreshold) {
-    std::vector<uint8_t> wallMask; 
+// === buildWallMask 可調門檻 ===
+// 演算法：對深色像素的 8 連通域，計算 maxSpan、包圍盒面積、填充率，
+// 任一條件滿足即視為牆：
+//   (A) maxSpan >= 外部傳入 spanThreshold        ── 長條牆（直接判定）
+//   (B) bboxArea >= WALL_MIN_BBOX_AREA AND
+//       minSpan >= WALL_MIN_BBOX_MIN_SPAN AND
+//       fillRatio <= WALL_MAX_FILL_RATIO          ── 空心框（小房間框線）
+//   (C) bboxArea >= WALL_MIN_BBOX_AREA AND
+//       perimeterCoverage >= WALL_MIN_PERIM_COVERAGE
+//                                                 ── 框線+內部文字相連時，
+//                                                    用「邊緣覆蓋率」補救判別
+// fillRatio = 連通域像素數 / 包圍盒面積。文字筆劃密度高 (>0.35)，
+// 牆框只佔包圍盒邊緣，密度低 (<0.25)。
+// perimeterCoverage = 連通域中位於包圍盒邊緣 PERIM_BAND_THICK 厚度內、
+// 且該行/列實際有像素的比例。空心框沿著四邊有像素，覆蓋率高 (>0.6)；
+// 即使框內文字把整體 fillRatio 拉高，框線本身仍會把四邊填滿。
+//
+// 各門檻設成具名常數，方便依現場資料微調：
+static constexpr int   WALL_MIN_BBOX_AREA       = 1500; // 包圍盒面積下限：低於此值多半是單一文字
+static constexpr int   WALL_MIN_BBOX_MIN_SPAN   = 25;   // 包圍盒短邊下限：太細長的物件不視為框
+static constexpr float WALL_MAX_FILL_RATIO      = 0.25f;// 純框線的填充率上限
+static constexpr int   PERIM_BAND_THICK         = 2;    // 視為「邊緣」的厚度（像素）
+static constexpr float WALL_MIN_PERIM_COVERAGE  = 0.60f;// 邊緣覆蓋率下限：框線即使被文字「污染」也應接近 1.0
+static constexpr float WALL_RULE_C_MAX_FILL     = 0.55f;// 規則 C 額外限制：避免 B/口/田 等粗體字（邊緣覆蓋率也高）誤判
+static constexpr int   WALL_DARK_CHROMA_MAX     = 30;   // 彩度上限：超過視為彩色（紅箭頭等），不視為深色
+// 規則 D：直線型「牆碎片」── 小房間的框線常被切成多段獨立直線
+// 偵測：短邊極細（≤ LINE_MAX_MIN_SPAN）且長邊夠長（≥ LINE_MIN_MAX_SPAN）
+// 文字筆劃即便細也不會出現「長度遠大於寬度」的長條形 bbox
+static constexpr int   LINE_MAX_MIN_SPAN        = 3;    // 直線碎片：短邊最多幾像素
+static constexpr int   LINE_MIN_MAX_SPAN        = 20;   // 直線碎片：長邊最少幾像素
+
+// 統計資訊，給 test harness 使用（emscripten 主流程不需要）
+struct WallComponentStat {
+    int minX, minY, maxX, maxY;
+    int pixels;
+    int maxSpan;
+    int bboxArea;
+    float fillRatio;
+    float perimCoverage;
+    bool isWall;
+    int  ruleHit; // 1=長牆 A, 2=空心框 B, 3=邊緣覆蓋 C, 0=非牆
+};
+
+// 純函式版：以任意 RGBA buffer 為輸入；spanThreshold<=0 回傳空向量。
+// statsOut 為可選，用於除錯與測試輸出。
+std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
+                                              int width, int height,
+                                              uint8_t darkThreshold,
+                                              int spanThreshold,
+                                              std::vector<WallComponentStat>* statsOut = nullptr) {
+    std::vector<uint8_t> wallMask;
     if (spanThreshold <= 0) return wallMask;
 
     int total = width * height;
@@ -173,13 +217,12 @@ std::vector<uint8_t> buildWallMask(int width, int height,
     // 標記深色像素：必須同時是「暗」且「低彩度」，避免紅色箭頭等彩色像素被誤抓
     std::vector<bool> isDark(total, false);
     for (int i = 0; i < total; i++) {
-        int r = mapBuffer[i*4], g = mapBuffer[i*4+1], b = mapBuffer[i*4+2];
+        int r = buf[i*4], g = buf[i*4+1], b = buf[i*4+2];
         int brightness = (r + g + b) / 3;
         int chroma = std::max({r, g, b}) - std::min({r, g, b});
-        if (brightness < (int)darkThreshold && chroma < 30) isDark[i] = true;
+        if (brightness < (int)darkThreshold && chroma < WALL_DARK_CHROMA_MAX) isDark[i] = true;
     }
 
-    // 8 連通域 BFS
     std::vector<bool> visited(total, false);
     const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy8[] = {-1, -1, -1,  0, 0,  1, 1, 1};
@@ -216,13 +259,88 @@ std::vector<uint8_t> buildWallMask(int width, int height,
                 }
             }
         }
-        int maxSpan = std::max(maxX - minX, maxY - minY);
+
+        int bboxW = maxX - minX + 1;
+        int bboxH = maxY - minY + 1;
+        int maxSpan = std::max(bboxW, bboxH) - 1; // 與舊版定義保持一致（差值，不含 +1）
+        int minSpan = std::min(bboxW, bboxH);
+        int bboxArea = bboxW * bboxH;
+        int pixels = (int)queue.size();
+        float fillRatio = (float)pixels / (float)std::max(1, bboxArea);
+
+        // 計算「邊緣覆蓋率」：bbox 四邊各取 PERIM_BAND_THICK 厚度，
+        // 看每一行/列在邊緣帶內是否至少有 1 個連通域像素。
+        // 框線即便連到內部文字，四邊邊緣行/列仍會被框線佔滿。
+        float perimCoverage = 0.0f;
+        if (bboxArea >= WALL_MIN_BBOX_AREA) {
+            // 在 bbox 內建一張小型 occupancy map
+            std::vector<uint8_t> occ(bboxArea, 0);
+            for (int idx : queue) {
+                int x = idx % width, y = idx / width;
+                occ[(y - minY) * bboxW + (x - minX)] = 1;
+            }
+            auto rowHasInBand = [&](int row) {
+                // row 為 bbox 內 y 座標：檢查 row 該列在左/右邊緣 PERIM_BAND_THICK 內是否有像素
+                for (int x = 0; x < std::min(PERIM_BAND_THICK, bboxW); x++)
+                    if (occ[row * bboxW + x]) return true;
+                for (int x = std::max(0, bboxW - PERIM_BAND_THICK); x < bboxW; x++)
+                    if (occ[row * bboxW + x]) return true;
+                return false;
+            };
+            auto colHasInBand = [&](int col) {
+                for (int y = 0; y < std::min(PERIM_BAND_THICK, bboxH); y++)
+                    if (occ[y * bboxW + col]) return true;
+                for (int y = std::max(0, bboxH - PERIM_BAND_THICK); y < bboxH; y++)
+                    if (occ[y * bboxW + col]) return true;
+                return false;
+            };
+            int hit = 0, sample = 0;
+            // 取上/下兩條 row band：對每個 column 檢查上下邊緣帶內是否有像素
+            for (int x = 0; x < bboxW; x++) { if (colHasInBand(x)) hit++; sample++; }
+            // 取左/右兩條 col band：對每個 row 檢查左右邊緣帶內是否有像素
+            for (int y = 0; y < bboxH; y++) { if (rowHasInBand(y)) hit++; sample++; }
+            perimCoverage = sample > 0 ? (float)hit / (float)sample : 0.0f;
+        }
+
+        int ruleHit = 0;
+        bool isWall = false;
         if (maxSpan >= spanThreshold) {
+            isWall = true; ruleHit = 1;                      // (A) 長牆
+        } else if (bboxArea >= WALL_MIN_BBOX_AREA
+                && minSpan   >= WALL_MIN_BBOX_MIN_SPAN
+                && fillRatio <= WALL_MAX_FILL_RATIO) {
+            isWall = true; ruleHit = 2;                      // (B) 空心框
+        } else if (bboxArea >= WALL_MIN_BBOX_AREA
+                && perimCoverage >= WALL_MIN_PERIM_COVERAGE
+                && fillRatio <= WALL_RULE_C_MAX_FILL) {
+            isWall = true; ruleHit = 3;                      // (C) 框線+文字相連
+        } else if (minSpan   <= LINE_MAX_MIN_SPAN
+                && maxSpan   >= LINE_MIN_MAX_SPAN) {
+            isWall = true; ruleHit = 4;                      // (D) 直線碎片
+        }
+
+        if (isWall) {
             for (int idx : queue) wallMask[idx] = 1;
+        }
+
+        if (statsOut) {
+            WallComponentStat s;
+            s.minX = minX; s.minY = minY; s.maxX = maxX; s.maxY = maxY;
+            s.pixels = pixels; s.maxSpan = maxSpan;
+            s.bboxArea = bboxArea; s.fillRatio = fillRatio;
+            s.perimCoverage = perimCoverage;
+            s.isWall = isWall; s.ruleHit = ruleHit;
+            statsOut->push_back(s);
         }
     }
 
     return wallMask;
+}
+
+// 舊介面：emscripten 主流程使用，內部轉呼叫 buildWallMaskFromBuffer。
+std::vector<uint8_t> buildWallMask(int width, int height,
+                                    uint8_t darkThreshold, int spanThreshold) {
+    return buildWallMaskFromBuffer(mapBuffer, width, height, darkThreshold, spanThreshold);
 }
 
 // 洪水填充演算法
@@ -417,8 +535,10 @@ void intelligentFloodFill(int width, int height,
     if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
 
     // 以深色像素的 8 連通域跨度區分「文字」與「牆壁」，建立絕對屏障遮罩。
-    // darkThreshold = 140：亮度低於 140 的像素視為深色（足以同時涵蓋文字與細牆）。
-    const uint8_t DARK_THRESHOLD = 128;
+    // darkThreshold = 170：放寬為「深色 + 中灰」皆視為候選；
+    // 許多平面圖的房間框線是淺灰（亮度 130~165），128 抓不到，
+    // 必須放寬到 170 才能涵蓋。低彩度限制 (chroma<30) 仍排除彩色填充與紅箭頭。
+    const uint8_t DARK_THRESHOLD = 170;
     std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
 
     std::vector<uint8_t> mask;
