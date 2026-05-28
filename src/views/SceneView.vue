@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
 
@@ -106,6 +107,8 @@ function downsampleMask(
 }
 
 // 移除與通行區相接超過 3 邊的孤立牆塊，避免 3D 牆面出現鋸齒突起。
+// 保留理由（greedy meshing 後）：仍能讓走廊裡 1 cell 寬的雜訊牆消失，減少切割大地板矩形的機會、
+// 順便降 wall rect 數。動作只翻 ds.data，不會破壞「視覺 = 碰撞同源」（兩者都讀 ds.data）。
 function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
   for (let pass = 0; pass < 3; pass++) {
     let changed = false
@@ -268,8 +271,9 @@ function buildGeometry() {
   disposeGroup(mapGroup)
   if (!mapStore.passableMask) return
 
-  // 直接使用原始 passableMask 建構幾何：每個 cell 一格 box（牆）或地板片。
-  // 不做 contour 簡化，3D 顯示結果與 2D 路徑識別預覽完全一致。
+  // 使用原始 passableMask 經 downsampleMask（+ smoothIsolatedWalls）後的 ds.data 建幾何。
+  // 不做 contour 簡化；改用 greedy meshing 合併同類連續 cell 為大矩形，再 mergeGeometries 成單一 Mesh，
+  // 兼顧「視覺＝碰撞同源」與長牆光滑、低頂點數。
   const ds = downsampleMask(mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight)
   const { data, width, height } = ds
 
@@ -310,60 +314,115 @@ function buildGeometry() {
     )
   }
 
-  // 統計可走 / 牆塊數，預先配置 InstancedMesh。
-  let passCount = 0
-  let wallCount = 0
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] === 1) passCount++
-    else wallCount++
+  // === Greedy meshing：把連續同類 cell 合併成大矩形，再用 mergeGeometries 變成單一 Mesh ===
+  // 目的：(1) 消除「box-per-cell」拼接接縫造成的階梯顆粒（長牆變成單一光滑平面）；
+  //      (2) 把頂點數從 cellCount × 24 壓到 rectCount × 24（典型壓縮 10~50 倍），手機友善。
+  // 演算法（標準 2D greedy meshing）：
+  //   對每個未訪問且符合 target（0=牆 / 1=地板）的 cell (y,x)，
+  //   先沿同 row 往右找最長連續 run 寬 W（同 target 且未訪問），
+  //   再往下找最長高度 H（每一 row 的 [x..x+W) 都同 target 且未訪問），
+  //   標記訪問，吐出 rect {x, y, w:W, h:H}。
+  // 保證視覺位置一致：rect (x,y,w,h) 的世界座標 = 原本 (x..x+w-1, y..y+h-1) 每個 cell box 各自的中心
+  // 合併後的等效矩形 — 中心 ((x + w/2)*dispCell - halfW, …, (y + h/2)*dispCell - halfH)、
+  // 尺寸 (w*dispCell, *, h*dispCell)；當 w=h=1 退化為舊版的「中心 (x+0.5)*dispCell - halfW」。
+  // 碰撞不受影響：上面已把 collisionMask = data 設好；greedyRects 只讀 data、不改它，碰撞網格與
+  // 座標映射（pxToColl/pxToDisplay）都不動，玩家依然是逐 cell 圓形碰撞。
+  function greedyRects(target: 0 | 1): Array<{ x: number; y: number; w: number; h: number }> {
+    const visited = new Uint8Array(width * height)
+    const out: Array<{ x: number; y: number; w: number; h: number }> = []
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x
+        if (visited[i]) continue
+        if (data[i] !== target) { visited[i] = 1; continue }
+        let w = 1
+        while (x + w < width && !visited[i + w] && data[i + w] === target) w++
+        let h = 1
+        outer: while (y + h < height) {
+          for (let k = 0; k < w; k++) {
+            const j = (y + h) * width + (x + k)
+            if (visited[j] || data[j] !== target) break outer
+          }
+          h++
+        }
+        for (let dy = 0; dy < h; dy++)
+          for (let dx = 0; dx < w; dx++)
+            visited[(y + dy) * width + (x + dx)] = 1
+        out.push({ x, y, w, h })
+      }
+    }
+    return out
   }
 
-  const cellCenterX = (gx: number) => (gx + 0.5) * dispCell - halfW
-  const cellCenterZ = (gy: number) => (gy + 0.5) * dispCell - halfH
+  const rectCenter = (r: { x: number; y: number; w: number; h: number }) => ({
+    cx: (r.x + r.w / 2) * dispCell - halfW,
+    cz: (r.y + r.h / 2) * dispCell - halfH,
+    sx: r.w * dispCell,
+    sz: r.h * dispCell,
+  })
 
-  if (passCount > 0) {
-    const floorGeo = new THREE.PlaneGeometry(dispCell, dispCell)
-    floorGeo.rotateX(-Math.PI / 2)
+  // ----- 地板 -----
+  const floorRects = greedyRects(1)
+  if (floorRects.length > 0) {
     const floorMat = new THREE.MeshStandardMaterial({
       color: 0x7fb8ff,
       roughness: 0.85,
       metalness: 0.05,
       side: THREE.DoubleSide,
     })
-    const floorInst = new THREE.InstancedMesh(floorGeo, floorMat, passCount)
-    const m = new THREE.Matrix4()
-    let idx = 0
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (data[y * width + x] !== 1) continue
-        m.makeTranslation(cellCenterX(x), 0, cellCenterZ(y))
-        floorInst.setMatrixAt(idx++, m)
-      }
+    const parts: THREE.BufferGeometry[] = []
+    for (const r of floorRects) {
+      const { cx, cz, sx, sz } = rectCenter(r)
+      const g = new THREE.PlaneGeometry(sx, sz)
+      g.rotateX(-Math.PI / 2)
+      g.translate(cx, 0, cz)
+      parts.push(g)
     }
-    floorInst.instanceMatrix.needsUpdate = true
-    mapGroup.add(floorInst)
+    const merged = mergeGeometries(parts, false)
+    parts.forEach((g) => g.dispose())
+    if (merged) {
+      const mesh = new THREE.Mesh(merged, floorMat)
+      mapGroup.add(mesh)
+    }
   }
 
-  if (wallCount > 0) {
-    const wallGeo = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
+  // ----- 牆 -----
+  const wallRects = greedyRects(0)
+  if (wallRects.length > 0) {
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0xf0f3f7,
       roughness: 0.6,
       metalness: 0.05,
     })
-    const wallInst = new THREE.InstancedMesh(wallGeo, wallMat, wallCount)
-    const m = new THREE.Matrix4()
-    let idx = 0
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (data[y * width + x] === 1) continue
-        m.makeTranslation(cellCenterX(x), wallHeight / 2, cellCenterZ(y))
-        wallInst.setMatrixAt(idx++, m)
-      }
+    const parts: THREE.BufferGeometry[] = []
+    for (const r of wallRects) {
+      const { cx, cz, sx, sz } = rectCenter(r)
+      const g = new THREE.BoxGeometry(sx, wallHeight, sz)
+      g.translate(cx, wallHeight / 2, cz)
+      parts.push(g)
     }
-    wallInst.instanceMatrix.needsUpdate = true
-    mapGroup.add(wallInst)
+    const merged = mergeGeometries(parts, false)
+    parts.forEach((g) => g.dispose())
+    if (merged) {
+      const mesh = new THREE.Mesh(merged, wallMat)
+      mapGroup.add(mesh)
+    }
   }
+
+  // 統計輸出：方便 Vercel preview 上對照 perf
+  const cellsTotal = width * height
+  const oldVerts = cellsTotal * 24 // 舊版每 cell 一個 box（24 verts）— 地板獨立 Plane 4 verts 忽略
+  const newVerts = wallRects.length * 24 + floorRects.length * 4
+  console.log(
+    '[SceneView] greedy meshing: %dx%d grid, walls=%d rects, floor=%d rects; verts %d → %d (%.1f%%)',
+    width,
+    height,
+    wallRects.length,
+    floorRects.length,
+    oldVerts,
+    newVerts,
+    oldVerts > 0 ? (100 * newVerts) / oldVerts : 0,
+  )
 }
 
 function buildPath() {
