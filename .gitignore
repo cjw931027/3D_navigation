@@ -43,3 +43,5 @@ change-records/*
 .claude/
 
 test_maps
+
+tests

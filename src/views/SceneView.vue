@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { useMapStore } from '@/stores/mapStore'
+import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
 
 const mapStore = useMapStore()
 const container = ref<HTMLDivElement | null>(null)
@@ -41,13 +43,13 @@ let sceneHalfH = 0
 let sceneUp = 1
 let sceneEyeHeight = 1.2
 let sceneWallHeight = 2
-// 碰撞用降採樣遮罩，與視覺牆體網格一致，避免半格穿牆。
+// 碰撞遮罩：直接指向 buildGeometry 內部建的 ds.data（已 downsample + smoothIsolatedWalls），
+// 與視覺牆體網格共用同一份資料。任何視覺上看到的牆/地板差異都會即刻反映到碰撞判定。
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
 let collisionH = 0
-// px→碰撞格（原始 passableMask，= sceneUp）；供 isPassableAtPixel / snap 使用。
+// px→碰撞格 / px→顯示格：值相等（都是「原始 px → ds 網格」係數），保留兩個變數只是語意分組。
 let pxToColl = 1
-// px→顯示格（下採樣後的 data 網格）；供 pixelToWorld 把像素座標映射回 3D 世界 XZ。
 let pxToDisplay = 1
 
 function disposeGroup(group: THREE.Group) {
@@ -105,6 +107,8 @@ function downsampleMask(
 }
 
 // 移除與通行區相接超過 3 邊的孤立牆塊，避免 3D 牆面出現鋸齒突起。
+// 保留理由（greedy meshing 後）：仍能讓走廊裡 1 cell 寬的雜訊牆消失，減少切割大地板矩形的機會、
+// 順便降 wall rect 數。動作只翻 ds.data，不會破壞「視覺 = 碰撞同源」（兩者都讀 ds.data）。
 function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
   for (let pass = 0; pass < 3; pass++) {
     let changed = false
@@ -234,33 +238,42 @@ function pixelToWorld(px: number, py: number): { x: number; z: number } {
   }
 }
 
-// 與牆體相鄰的貼牆緩衝；需大於 camera.near 折算回 cell 的比例，避免近裁面切穿牆面，
-// 同時要夠大以防玩家沿牆滑行時從薄牆之間的對角縫隙鑽過去。
-const COLLISION_MARGIN = 0.3
+// === 玩家圓形碰撞 ===
+// 把玩家視為「以位置為圓心、半徑 PLAYER_RADIUS_CELLS 的圓」，圓周不得與任何牆 cell 重疊。
+// 單位是 ds 網格 cell（= 視覺幾何 cell = collision cell；pxToColl == pxToDisplay）。
+//
+// 數值選擇：
+//   camera.near = 0.01 world units（見 PerspectiveCamera）。
+//   一個 ds cell 的世界尺寸 = sceneCellSize = MAP_EXTENT / max(width, height)
+//     典型平面圖 (downsample 後 maxDim ≤ 200, MAP_EXTENT=20) ⇒ ≈ 0.1 world／cell
+//     ⇒ camera.near ≈ 0.1 cell
+//   半徑 0.35 cell（≈ camera.near 的 3.5 倍）：
+//     - 第一人稱近裁面與牆面之間永遠有 0.25 cell 的緩衝，畫面不會穿牆。
+//     - 走廊最窄為 1 cell；圓直徑 0.7 < 1，正常走廊不會卡住。
+//
+// 重要：此常數固定以「ds cell」為單位，不受原始 mask 解析度或 upscaleFactor 影響
+//   （因為 pxToColl 同步把 px → ds cell，玩家半徑相對於世界尺寸維持 0.35 × sceneCellSize）。
+const PLAYER_RADIUS_CELLS = 0.35
+
+function collisionGrid(): GridMask | null {
+  if (!collisionMask) return null
+  return { data: collisionMask, width: collisionW, height: collisionH }
+}
+
+// 玩家中心是否可以站在 (px, py)：圓周不與任何牆 cell 重疊。
 function isPassableAtPixel(px: number, py: number): boolean {
-  if (!collisionMask) return false
-  const cu = px * pxToColl
-  const cv = py * pxToColl
-  const cx = Math.floor(cu)
-  const cy = Math.floor(cv)
-  if (cx < 0 || cx >= collisionW) return false
-  if (cy < 0 || cy >= collisionH) return false
-  if (collisionMask[cy * collisionW + cx] !== 1) return false
-  const fx = cu - cx
-  const fy = cv - cy
-  if (fx < COLLISION_MARGIN && !isCollCellPassable(cx - 1, cy)) return false
-  if (fx > 1 - COLLISION_MARGIN && !isCollCellPassable(cx + 1, cy)) return false
-  if (fy < COLLISION_MARGIN && !isCollCellPassable(cx, cy - 1)) return false
-  if (fy > 1 - COLLISION_MARGIN && !isCollCellPassable(cx, cy + 1)) return false
-  return true
+  const g = collisionGrid()
+  if (!g) return false
+  return canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
 }
 
 function buildGeometry() {
   disposeGroup(mapGroup)
   if (!mapStore.passableMask) return
 
-  // 直接使用原始 passableMask 建構幾何：每個 cell 一格 box（牆）或地板片。
-  // 不做 contour 簡化，3D 顯示結果與 2D 路徑識別預覽完全一致。
+  // 使用原始 passableMask 經 downsampleMask（+ smoothIsolatedWalls）後的 ds.data 建幾何。
+  // 不做 contour 簡化；改用 greedy meshing 合併同類連續 cell 為大矩形，再 mergeGeometries 成單一 Mesh，
+  // 兼顧「視覺＝碰撞同源」與長牆光滑、低頂點數。
   const ds = downsampleMask(mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight)
   const { data, width, height } = ds
 
@@ -276,74 +289,140 @@ function buildGeometry() {
   sceneWallHeight = wallHeight
   sceneEyeHeight = wallHeight * 0.75
 
-  // 碰撞使用原始 passableMask（與視覺幾何完全同源，只是 downsample 比例不同）。
-  collisionMask = new Uint8Array(mapStore.passableMask)
-  collisionW = mapStore.maskWidth
-  collisionH = mapStore.maskHeight
-  pxToColl = sceneUp
+  // === 碰撞 / 視覺同源約定 ===
+  // 碰撞遮罩必須與「視覺幾何實際使用的那份資料」完全相同。視覺幾何走 ds.data
+  // （downsampleMask 多數決 + smoothIsolatedWalls 平滑），所以 collisionMask 也要指到同一份。
+  // 過去 collisionMask 直接複製 mapStore.passableMask，平滑後翻成可走的孤立牆 cell
+  // 在視覺上是地板、碰撞上仍是牆 → 玩家撞到「隱形牆」並看似穿透其後方的視覺牆。
+  // 改成共用 ds.data 後：凡 buildGeometry 看到「這格是牆」的位置，碰撞也擋；視覺＝碰撞。
+  collisionMask = data
+  collisionW = width
+  collisionH = height
+  // pxToColl 與 pxToDisplay 完全相同（兩者都是「原始 px 座標 → ds 網格座標」的係數）
   pxToDisplay = (sceneUp * width) / mapStore.maskWidth
+  pxToColl = pxToDisplay
 
-  // 統計可走 / 牆塊數，預先配置 InstancedMesh。
-  let passCount = 0
-  let wallCount = 0
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] === 1) passCount++
-    else wallCount++
+  // 走廊寬度健檢：downsample 後 1 cell 對應 step 個原始 mask cell；
+  // PLAYER_RADIUS_CELLS=0.35 換算後直徑 0.7 ds-cell，1 cell 寬走廊在 ds 上仍可塞下。
+  // 若原圖的窄走廊在 downsample 多數決下被吃成 0 cell，玩家無法進入 — 屬於 downsample
+  // 本身的限制，需藉由提高 MAX_CELLS_LONG_SIDE 或調整 PLAYER_RADIUS_CELLS 解決。
+  if (width < 3 || height < 3) {
+    console.warn(
+      '[SceneView] downsampled grid is very small (%dx%d); 0.35-cell player may not fit narrow corridors. Consider raising MAX_CELLS_LONG_SIDE.',
+      width,
+      height,
+    )
   }
 
-  const cellCenterX = (gx: number) => (gx + 0.5) * dispCell - halfW
-  const cellCenterZ = (gy: number) => (gy + 0.5) * dispCell - halfH
+  // === Greedy meshing：把連續同類 cell 合併成大矩形，再用 mergeGeometries 變成單一 Mesh ===
+  // 目的：(1) 消除「box-per-cell」拼接接縫造成的階梯顆粒（長牆變成單一光滑平面）；
+  //      (2) 把頂點數從 cellCount × 24 壓到 rectCount × 24（典型壓縮 10~50 倍），手機友善。
+  // 演算法（標準 2D greedy meshing）：
+  //   對每個未訪問且符合 target（0=牆 / 1=地板）的 cell (y,x)，
+  //   先沿同 row 往右找最長連續 run 寬 W（同 target 且未訪問），
+  //   再往下找最長高度 H（每一 row 的 [x..x+W) 都同 target 且未訪問），
+  //   標記訪問，吐出 rect {x, y, w:W, h:H}。
+  // 保證視覺位置一致：rect (x,y,w,h) 的世界座標 = 原本 (x..x+w-1, y..y+h-1) 每個 cell box 各自的中心
+  // 合併後的等效矩形 — 中心 ((x + w/2)*dispCell - halfW, …, (y + h/2)*dispCell - halfH)、
+  // 尺寸 (w*dispCell, *, h*dispCell)；當 w=h=1 退化為舊版的「中心 (x+0.5)*dispCell - halfW」。
+  // 碰撞不受影響：上面已把 collisionMask = data 設好；greedyRects 只讀 data、不改它，碰撞網格與
+  // 座標映射（pxToColl/pxToDisplay）都不動，玩家依然是逐 cell 圓形碰撞。
+  function greedyRects(target: 0 | 1): Array<{ x: number; y: number; w: number; h: number }> {
+    const visited = new Uint8Array(width * height)
+    const out: Array<{ x: number; y: number; w: number; h: number }> = []
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x
+        if (visited[i]) continue
+        if (data[i] !== target) { visited[i] = 1; continue }
+        let w = 1
+        while (x + w < width && !visited[i + w] && data[i + w] === target) w++
+        let h = 1
+        outer: while (y + h < height) {
+          for (let k = 0; k < w; k++) {
+            const j = (y + h) * width + (x + k)
+            if (visited[j] || data[j] !== target) break outer
+          }
+          h++
+        }
+        for (let dy = 0; dy < h; dy++)
+          for (let dx = 0; dx < w; dx++)
+            visited[(y + dy) * width + (x + dx)] = 1
+        out.push({ x, y, w, h })
+      }
+    }
+    return out
+  }
 
-  if (passCount > 0) {
-    const floorGeo = new THREE.PlaneGeometry(dispCell, dispCell)
-    floorGeo.rotateX(-Math.PI / 2)
+  const rectCenter = (r: { x: number; y: number; w: number; h: number }) => ({
+    cx: (r.x + r.w / 2) * dispCell - halfW,
+    cz: (r.y + r.h / 2) * dispCell - halfH,
+    sx: r.w * dispCell,
+    sz: r.h * dispCell,
+  })
+
+  // ----- 地板 -----
+  const floorRects = greedyRects(1)
+  if (floorRects.length > 0) {
     const floorMat = new THREE.MeshStandardMaterial({
       color: 0x7fb8ff,
       roughness: 0.85,
       metalness: 0.05,
       side: THREE.DoubleSide,
     })
-    const floorInst = new THREE.InstancedMesh(floorGeo, floorMat, passCount)
-    const m = new THREE.Matrix4()
-    let idx = 0
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (data[y * width + x] !== 1) continue
-        m.makeTranslation(cellCenterX(x), 0, cellCenterZ(y))
-        floorInst.setMatrixAt(idx++, m)
-      }
+    const parts: THREE.BufferGeometry[] = []
+    for (const r of floorRects) {
+      const { cx, cz, sx, sz } = rectCenter(r)
+      const g = new THREE.PlaneGeometry(sx, sz)
+      g.rotateX(-Math.PI / 2)
+      g.translate(cx, 0, cz)
+      parts.push(g)
     }
-    floorInst.instanceMatrix.needsUpdate = true
-    mapGroup.add(floorInst)
+    const merged = mergeGeometries(parts, false)
+    parts.forEach((g) => g.dispose())
+    if (merged) {
+      const mesh = new THREE.Mesh(merged, floorMat)
+      mapGroup.add(mesh)
+    }
   }
 
-  if (wallCount > 0) {
-    const wallGeo = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
+  // ----- 牆 -----
+  const wallRects = greedyRects(0)
+  if (wallRects.length > 0) {
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0xf0f3f7,
       roughness: 0.6,
       metalness: 0.05,
     })
-    const wallInst = new THREE.InstancedMesh(wallGeo, wallMat, wallCount)
-    const m = new THREE.Matrix4()
-    let idx = 0
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (data[y * width + x] === 1) continue
-        m.makeTranslation(cellCenterX(x), wallHeight / 2, cellCenterZ(y))
-        wallInst.setMatrixAt(idx++, m)
-      }
+    const parts: THREE.BufferGeometry[] = []
+    for (const r of wallRects) {
+      const { cx, cz, sx, sz } = rectCenter(r)
+      const g = new THREE.BoxGeometry(sx, wallHeight, sz)
+      g.translate(cx, wallHeight / 2, cz)
+      parts.push(g)
     }
-    wallInst.instanceMatrix.needsUpdate = true
-    mapGroup.add(wallInst)
+    const merged = mergeGeometries(parts, false)
+    parts.forEach((g) => g.dispose())
+    if (merged) {
+      const mesh = new THREE.Mesh(merged, wallMat)
+      mapGroup.add(mesh)
+    }
   }
-}
 
-function isCollCellPassable(cx: number, cy: number): boolean {
-  if (!collisionMask) return false
-  if (cx < 0 || cx >= collisionW) return false
-  if (cy < 0 || cy >= collisionH) return false
-  return collisionMask[cy * collisionW + cx] === 1
+  // 統計輸出：方便 Vercel preview 上對照 perf
+  const cellsTotal = width * height
+  const oldVerts = cellsTotal * 24 // 舊版每 cell 一個 box（24 verts）— 地板獨立 Plane 4 verts 忽略
+  const newVerts = wallRects.length * 24 + floorRects.length * 4
+  console.log(
+    '[SceneView] greedy meshing: %dx%d grid, walls=%d rects, floor=%d rects; verts %d → %d (%.1f%%)',
+    width,
+    height,
+    wallRects.length,
+    floorRects.length,
+    oldVerts,
+    newVerts,
+    oldVerts > 0 ? (100 * newVerts) / oldVerts : 0,
+  )
 }
 
 function buildPath() {
@@ -424,46 +503,43 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
-// 在碰撞遮罩上 BFS 找離 (px, py) 最近的 passable cell，轉回原始像素座標。
+// 在碰撞遮罩上 BFS 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，
+// 回傳原始像素座標。圓心固定取 cell 正中央：cell 中心到該 cell 任一邊緣的距離為 0.5 cell，
+// 大於 R=0.35，因此 cell 中心永遠是該 cell 內最不容易與牆重疊的點。
 function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
-  if (!collisionMask) return { x: px, y: py }
+  const g = collisionGrid()
+  if (!g) return { x: px, y: py }
   const cx0 = Math.floor(px * pxToColl)
   const cy0 = Math.floor(py * pxToColl)
-  if (
-    cx0 >= 0 &&
-    cx0 < collisionW &&
-    cy0 >= 0 &&
-    cy0 < collisionH &&
-    collisionMask[cy0 * collisionW + cx0] === 1
-  ) {
+  // 原地若已合法（不只可走，圓也塞得進）就直接回傳原座標
+  if (canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)) {
     return { x: px, y: py }
   }
   const seen = new Uint8Array(collisionW * collisionH)
-  const queue: number[] = [cy0 * collisionW + cx0]
-  if (cx0 >= 0 && cx0 < collisionW && cy0 >= 0 && cy0 < collisionH) {
-    seen[cy0 * collisionW + cx0] = 1
+  const queue: number[] = []
+  const enqueue = (cx: number, cy: number) => {
+    if (cx < 0 || cx >= collisionW || cy < 0 || cy >= collisionH) return
+    const i = cy * collisionW + cx
+    if (seen[i]) return
+    seen[i] = 1
+    queue.push(i)
   }
+  enqueue(cx0, cy0)
   while (queue.length > 0) {
     const idx = queue.shift()!
     const cx = idx % collisionW
     const cy = Math.floor(idx / collisionW)
-    if (cx >= 0 && cx < collisionW && cy >= 0 && cy < collisionH && collisionMask[idx] === 1) {
-      return { x: (cx + 0.5) / pxToColl, y: (cy + 0.5) / pxToColl }
+    if (collisionMask![idx] === 1) {
+      const cu = cx + 0.5
+      const cv = cy + 0.5
+      if (canStandAt(g, cu, cv, PLAYER_RADIUS_CELLS)) {
+        return { x: cu / pxToColl, y: cv / pxToColl }
+      }
     }
-    for (const [dx, dy] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      const nx = cx + dx,
-        ny = cy + dy
-      if (nx < 0 || nx >= collisionW || ny < 0 || ny >= collisionH) continue
-      const ni = ny * collisionW + nx
-      if (seen[ni]) continue
-      seen[ni] = 1
-      queue.push(ni)
-    }
+    enqueue(cx + 1, cy)
+    enqueue(cx - 1, cy)
+    enqueue(cx, cy + 1)
+    enqueue(cx, cy - 1)
   }
   return { x: px, y: py }
 }
@@ -531,36 +607,19 @@ function tryMove(dtSec: number) {
   }
 
   if (moveInput.fwd !== 0) {
+    const g = collisionGrid()
+    if (!g) return
     const h = mapStore.userHeading ?? 0
-    const totalStep = moveInput.fwd * MOVE_SPEED_PX * dtSec
+    const totalStepPx = moveInput.fwd * MOVE_SPEED_PX * dtSec
     const dirX = Math.cos(h)
     const dirY = Math.sin(h)
-    // 以 ≤ 0.3 collision cell 為單位切 substep，避免單幀位移大於薄牆厚度時直接穿過去（tunneling）。
-    const maxSubPx = 0.3 / Math.max(pxToColl, 1e-6)
-    const nSub = Math.max(1, Math.ceil(Math.abs(totalStep) / maxSubPx))
-    const subStep = totalStep / nSub
-    let fx = mapStore.userPosition.x
-    let fy = mapStore.userPosition.y
-    for (let i = 0; i < nSub; i++) {
-      const nx = fx + dirX * subStep
-      const ny = fy + dirY * subStep
-      // 對角優先；若只有單軸通則沿該軸滑行並於本幀停住。
-      if (isPassableAtPixel(nx, ny)) {
-        fx = nx
-        fy = ny
-        continue
-      }
-      if (isPassableAtPixel(nx, fy)) {
-        fx = nx
-        break
-      }
-      if (isPassableAtPixel(fx, ny)) {
-        fy = ny
-        break
-      }
-      break
-    }
-    mapStore.userPosition = { x: fx, y: fy }
+    // 全部換算到 collision-cell 座標系再交給 moveCircle，子步長 0.3 cell（同舊版 tunneling 門檻）
+    const cu = mapStore.userPosition.x * pxToColl
+    const cv = mapStore.userPosition.y * pxToColl
+    const duTotal = dirX * totalStepPx * pxToColl
+    const dvTotal = dirY * totalStepPx * pxToColl
+    const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
+    mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
   }
 }
 

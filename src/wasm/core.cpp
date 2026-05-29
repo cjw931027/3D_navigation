@@ -20,6 +20,9 @@ static int                   g_maskHeight = 0;
 // 路徑以 x0,y0,x1,y1,... 交錯存放，JS 以 Int32Array 讀取。
 static std::vector<int32_t>  g_pathBuffer;
 
+// 邊緣平滑 opening 的 kernel 大小，預設 3；測試 harness 可改為 0 關閉以做 before/after 對比。
+static int gEdgeSmoothKernelSize = 3;
+
 int allocateMemory(int size) {
     if (mapBuffer != nullptr) free(mapBuffer);
     mapBuffer = (uint8_t*)malloc(size);
@@ -436,6 +439,18 @@ void closeSmallHolesWithBarrier(std::vector<uint8_t>& mask,
     erode(mask, width, height, kSize);
 }
 
+// 對 passableMask 做 opening（erode→dilate）平滑邊緣鋸齒。
+// erode 階段把 1~2 px 的邊緣突起磨掉；dilate 階段把整體形狀還原回原本範圍。
+// dilate 必須走 dilateWithBarrier，不可越過 wallMask（真牆絕對不能被覆蓋）。
+// kSize 寧小勿大：太大會吃掉窄門與細牆。
+void openWithBarrier(std::vector<uint8_t>& mask,
+                     const std::vector<uint8_t>& wallMask,
+                     int width, int height, int kSize) {
+    if (kSize <= 1) return;
+    erode(mask, width, height, kSize);
+    dilateWithBarrier(mask, wallMask, width, height, kSize);
+}
+
 // 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起
 // 會被視為可走。但若該連通域有任一格屬於 wallMask，整塊都保留（屬於真牆延伸）。
 void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
@@ -548,6 +563,12 @@ void intelligentFloodFill(int width, int height,
         int tolSq = pathColorTolerance * pathColorTolerance;
         mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
                                      closingKernelSize, wallThicken, wallMask);
+
+    // 邊緣平滑（opening: erode→dilate）：磨掉 RGB 容差篩出的 1~2 px 鋸齒，
+    // dilate 仍受 wallMask 屏障保護，不會把可走區擴到牆外。
+    // kSize 預設 3：足以削掉典型 JPG 壓縮 / 色彩漸變造成的階梯，又不至於吃掉窄門。
+    // 用 static 變數而非 constexpr，方便離線 test harness 暫時改成 0 比對開關效果。
+    openWithBarrier(mask, wallMask, width, height, gEdgeSmoothKernelSize);
 
     if (denoiseMinArea > 0) {
         removeSmallMaskComponents(mask, width, height, denoiseMinArea);
