@@ -553,7 +553,7 @@ void intelligentFloodFill(int width, int height,
     // darkThreshold = 170：放寬為「深色 + 中灰」皆視為候選；
     // 許多平面圖的房間框線是淺灰（亮度 130~165），128 抓不到，
     // 必須放寬到 170 才能涵蓋。低彩度限制 (chroma<30) 仍排除彩色填充與紅箭頭。
-    const uint8_t DARK_THRESHOLD = 170;
+    const uint8_t DARK_THRESHOLD = 190;
     std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
 
     std::vector<uint8_t> mask;

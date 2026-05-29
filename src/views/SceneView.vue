@@ -314,114 +314,357 @@ function buildGeometry() {
     )
   }
 
-  // === Greedy meshing：把連續同類 cell 合併成大矩形，再用 mergeGeometries 變成單一 Mesh ===
-  // 目的：(1) 消除「box-per-cell」拼接接縫造成的階梯顆粒（長牆變成單一光滑平面）；
-  //      (2) 把頂點數從 cellCount × 24 壓到 rectCount × 24（典型壓縮 10~50 倍），手機友善。
-  // 演算法（標準 2D greedy meshing）：
-  //   對每個未訪問且符合 target（0=牆 / 1=地板）的 cell (y,x)，
-  //   先沿同 row 往右找最長連續 run 寬 W（同 target 且未訪問），
-  //   再往下找最長高度 H（每一 row 的 [x..x+W) 都同 target 且未訪問），
-  //   標記訪問，吐出 rect {x, y, w:W, h:H}。
-  // 保證視覺位置一致：rect (x,y,w,h) 的世界座標 = 原本 (x..x+w-1, y..y+h-1) 每個 cell box 各自的中心
-  // 合併後的等效矩形 — 中心 ((x + w/2)*dispCell - halfW, …, (y + h/2)*dispCell - halfH)、
-  // 尺寸 (w*dispCell, *, h*dispCell)；當 w=h=1 退化為舊版的「中心 (x+0.5)*dispCell - halfW」。
-  // 碰撞不受影響：上面已把 collisionMask = data 設好；greedyRects 只讀 data、不改它，碰撞網格與
-  // 座標映射（pxToColl/pxToDisplay）都不動，玩家依然是逐 cell 圓形碰撞。
-  function greedyRects(target: 0 | 1): Array<{ x: number; y: number; w: number; h: number }> {
-    const visited = new Uint8Array(width * height)
-    const out: Array<{ x: number; y: number; w: number; h: number }> = []
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x
-        if (visited[i]) continue
-        if (data[i] !== target) { visited[i] = 1; continue }
-        let w = 1
-        while (x + w < width && !visited[i + w] && data[i + w] === target) w++
-        let h = 1
-        outer: while (y + h < height) {
-          for (let k = 0; k < w; k++) {
-            const j = (y + h) * width + (x + k)
-            if (visited[j] || data[j] !== target) break outer
-          }
-          h++
-        }
-        for (let dy = 0; dy < h; dy++)
-          for (let dx = 0; dx < w; dx++)
-            visited[(y + dy) * width + (x + dx)] = 1
-        out.push({ x, y, w, h })
+  // === 視覺幾何：輪廓抽取 + Douglas-Peucker 簡化 ===
+  //
+  // 問題：可走 / 牆遮罩是 0/1 網格，斜向邊界天生是階梯狀；無論 box-per-cell 或 greedy meshing
+  // 都保留同一條階梯。要消除斜邊鋸齒，必須把網格邊界抽成多邊形折線、用 DP 擬合成少數直線段。
+  //
+  // 步驟：
+  //   1. 在 cell-corner lattice 上抽取「可走 cell 與牆 cell 之間的邊」。
+  //      對每個可走 cell (cx, cy)：
+  //        - 上方鄰格是牆 → 加邊  (cx+1, cy)   → (cx,   cy)    （可走在邊的下側、亦即左側）
+  //        - 下方鄰格是牆 → 加邊  (cx,   cy+1) → (cx+1, cy+1)
+  //        - 左方鄰格是牆 → 加邊  (cx,   cy)   → (cx,   cy+1)
+  //        - 右方鄰格是牆 → 加邊  (cx+1, cy+1) → (cx+1, cy)
+  //      界外視為牆，所以地圖外緣自動成邊。所有邊「可走在左側」→ 沿邊走一圈時可走永遠在左。
+  //      在 y-down lattice 中、用標準 Shoelace 公式計算 signedArea：
+  //        外環（可走元件）→ signedArea < 0
+  //        內部牆塊環       → signedArea > 0
+  //      每個 lattice 頂點最多只屬於一條入邊與一條出邊，可直接串成封閉迴圈。
+  //   2. Douglas–Peucker 簡化：每條 ring 跑 DP，epsilon = DP_EPSILON_CELLS（≈ 1 cell 寬度）。
+  //      偏小設計 — 寧可保留多餘節點也不要把窄門吃掉。
+  //   3. 安全內偏（往可走區內收）：對簡化後每個頂點，沿著「兩條相鄰邊的內向法線平均」推進
+  //      INWARD_BIAS_CELLS 距離。內向法線 = 邊方向左轉 90°（因為可走在左）。內偏後視覺可走區
+  //      會比碰撞網格小一點，方向是安全的（視覺可走 ⊆ 碰撞可走，不會出現「看起來能走、
+  //      實際碰到牆」的反向穿牆錯覺）。位移量遠小於玩家半徑 0.35 cell，視覺感受不到。
+  //   4. 牆：對「每條 ring 的每條邊」手動建一個垂直 quad（避開 ExtrudeGeometry 軸向陷阱）。
+  //      邊 (p1→p2)（可走在左側）→ A=(x1,0,z1) B=(x2,0,z2) C=(x2,H,z2) D=(x1,H,z1)，
+  //      三角形 (A,C,B)+(A,D,C) 使法線朝可走側。所有 ring（外環+牆塊環）的邊合成單一 BufferGeometry。
+  //      牆底 y=0、牆頂 y=wallHeight，與地板 y=0 對齊，不浮空。
+  //   5. 地板：對每個可走元件的外環建 Shape（holes = 該元件內所有牆塊環），ShapeGeometry 平鋪
+  //      在 y=0；視覺與碰撞 cell 的可走範圍幾乎完全重合（差距 = INWARD_BIAS_CELLS）。
+  //
+  // 碰撞為何不受影響：
+  //   collisionMask / collisionW / collisionH / pxToColl / pxToDisplay 在本函式上半段（碰撞同源
+  //   設定處）已綁定到原始 ds.data；本段只「讀」data 抽輪廓，從不改寫。canStandAt / moveCircle
+  //   / snapToNearestPassable / runAStar 全部仍跑在原始網格上，玩家碰撞行為與重構前完全一致。
+  //   視覺牆面與碰撞牆面之間 ≤ INWARD_BIAS_CELLS 的偏移、且方向安全（視覺可走 ⊆ 碰撞可走）。
+  //
+  // 開關：USE_CONTOUR_WALLS = false 時回退到 box-per-cell 舊版（debug 用）。
+  const USE_CONTOUR_WALLS = true
+  const DP_EPSILON_CELLS = 0.9   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
+  const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
+
+  type Pt = [number, number] // lattice 座標 (x, y)，整數即 cell 邊
+  type Ring = Pt[]            // 封閉環（首尾不重複）
+
+  // -- (1) 邊界邊抽取 + 串環 --
+  function extractRings(): Ring[] {
+    // key = vy * (width+1) + vx；每個頂點最多一條 outgoing edge
+    const next = new Map<number, number>()
+    const vkey = (vx: number, vy: number) => vy * (width + 1) + vx
+    const unkey = (k: number): Pt => [k % (width + 1), Math.floor(k / (width + 1))]
+    const cell = (cx: number, cy: number) => {
+      if (cx < 0 || cx >= width || cy < 0 || cy >= height) return 0
+      return data[cy * width + cx]
+    }
+    const addEdge = (ax: number, ay: number, bx: number, by: number) => {
+      next.set(vkey(ax, ay), vkey(bx, by))
+    }
+    for (let cy = 0; cy < height; cy++) {
+      for (let cx = 0; cx < width; cx++) {
+        if (cell(cx, cy) !== 1) continue
+        if (cell(cx, cy - 1) === 0) addEdge(cx + 1, cy, cx, cy)         // top
+        if (cell(cx, cy + 1) === 0) addEdge(cx, cy + 1, cx + 1, cy + 1) // bottom
+        if (cell(cx - 1, cy) === 0) addEdge(cx, cy, cx, cy + 1)         // left
+        if (cell(cx + 1, cy) === 0) addEdge(cx + 1, cy + 1, cx + 1, cy) // right
       }
+    }
+    const rings: Ring[] = []
+    const visited = new Set<number>()
+    for (const startKey of next.keys()) {
+      if (visited.has(startKey)) continue
+      const ring: Ring = []
+      let k = startKey
+      let safety = next.size + 10
+      while (safety-- > 0) {
+        if (visited.has(k)) break
+        visited.add(k)
+        ring.push(unkey(k))
+        const nk = next.get(k)
+        if (nk === undefined) break
+        k = nk
+        if (k === startKey) break
+      }
+      if (ring.length >= 3) rings.push(ring)
+    }
+    return rings
+  }
+
+  // signed area in lattice coords (Shoelace). y-down 座標：>0 = 順時針，<0 = 逆時針。
+  function signedArea(r: Ring): number {
+    let s = 0
+    for (let i = 0; i < r.length; i++) {
+      const a = r[i]!, b = r[(i + 1) % r.length]!
+      s += a[0] * b[1] - b[0] * a[1]
+    }
+    return s * 0.5
+  }
+
+  // -- (2) Douglas-Peucker（保留首尾；對封閉環，先選一個距離最遠對偶點切兩段再簡化） --
+  function dpSimplify(pts: Pt[], eps: number): Pt[] {
+    if (pts.length <= 2) return pts.slice()
+    const n = pts.length
+    const keep = new Uint8Array(n)
+    keep[0] = 1
+    keep[n - 1] = 1
+    const stack: Array<[number, number]> = [[0, n - 1]]
+    while (stack.length) {
+      const [lo, hi] = stack.pop()!
+      let maxD = -1, maxI = -1
+      const ax = pts[lo]![0], ay = pts[lo]![1]
+      const bx = pts[hi]![0], by = pts[hi]![1]
+      const dx = bx - ax, dy = by - ay
+      const len2 = dx * dx + dy * dy
+      for (let i = lo + 1; i < hi; i++) {
+        const px = pts[i]![0], py = pts[i]![1]
+        let d2
+        if (len2 === 0) {
+          const ex = px - ax, ey = py - ay
+          d2 = ex * ex + ey * ey
+        } else {
+          const cross = (px - ax) * dy - (py - ay) * dx
+          d2 = (cross * cross) / len2
+        }
+        if (d2 > maxD) { maxD = d2; maxI = i }
+      }
+      if (maxD > eps * eps && maxI > 0) {
+        keep[maxI] = 1
+        stack.push([lo, maxI], [maxI, hi])
+      }
+    }
+    const out: Pt[] = []
+    for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i]!)
+    return out
+  }
+
+  function simplifyRing(ring: Ring, eps: number): Ring {
+    // 對封閉環，把頂點 0 接到末，視為線段；DP 直接跑 [0..n-1, 0] 再去掉重複收尾
+    if (ring.length <= 3) return ring.slice()
+    const closed: Pt[] = [...ring, ring[0]!]
+    const simp = dpSimplify(closed, eps)
+    if (simp.length > 1 && simp[0]![0] === simp[simp.length - 1]![0] &&
+        simp[0]![1] === simp[simp.length - 1]![1]) simp.pop()
+    return simp
+  }
+
+  // -- (3) 安全內偏：朝可走側推 bias --
+  // 每條邊內向法線 = 邊方向左轉 90°（因為可走永遠在邊的左側）。
+  // 對每個頂點取「進邊」與「出邊」內向法線的平均，作為位移方向。
+  function inwardBias(ring: Ring, bias: number): Ring {
+    const n = ring.length
+    if (n < 3 || bias === 0) return ring.slice()
+    const out: Ring = []
+    for (let i = 0; i < n; i++) {
+      const prev = ring[(i - 1 + n) % n]!
+      const cur = ring[i]!
+      const next = ring[(i + 1) % n]!
+      const e1x = cur[0] - prev[0], e1y = cur[1] - prev[1]
+      const e2x = next[0] - cur[0], e2y = next[1] - cur[1]
+      // 邊方向左轉 90°：(dx, dy) → (-dy, dx)；但 lattice 是 y-down 螢幕座標，
+      // 而我們抽邊時把可走放在「左」(用標準數學座標的左)；y-down 下顯示為右；
+      // 經實測：簡單沿用 (-dy, dx) 在 y-down 下會把外環往「外」推。改用 (dy, -dx) 把外環往「內」。
+      // 內外環方向相反，自動互補（hole 也朝該方向的內側推）。
+      const n1x = e1y,  n1y = -e1x
+      const n2x = e2y,  n2y = -e2x
+      let nx = n1x + n2x, ny = n1y + n2y
+      const m = Math.hypot(nx, ny)
+      if (m > 1e-9) { nx /= m; ny /= m }
+      out.push([cur[0] + nx * bias, cur[1] + ny * bias])
     }
     return out
   }
 
-  const rectCenter = (r: { x: number; y: number; w: number; h: number }) => ({
-    cx: (r.x + r.w / 2) * dispCell - halfW,
-    cz: (r.y + r.h / 2) * dispCell - halfH,
-    sx: r.w * dispCell,
-    sz: r.h * dispCell,
+  const latticeToWorld = (p: Pt) => new THREE.Vector2(
+    p[0] * dispCell - halfW,
+    p[1] * dispCell - halfH,
+  )
+
+  // ---- Fallback：保留 box-per-cell 路徑作為 USE_CONTOUR_WALLS=false 的 debug 開關 ----
+  function buildBoxFallback() {
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf0f3f7, roughness: 0.6, metalness: 0.05 })
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })
+    const wallParts: THREE.BufferGeometry[] = []
+    const floorParts: THREE.BufferGeometry[] = []
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const cx = (x + 0.5) * dispCell - halfW
+      const cz = (y + 0.5) * dispCell - halfH
+      if (data[y * width + x] === 1) {
+        const g = new THREE.PlaneGeometry(dispCell, dispCell)
+        g.rotateX(-Math.PI / 2); g.translate(cx, 0, cz); floorParts.push(g)
+      } else {
+        const g = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
+        g.translate(cx, wallHeight / 2, cz); wallParts.push(g)
+      }
+    }
+    const fm = mergeGeometries(floorParts, false); floorParts.forEach(g => g.dispose())
+    const wm = mergeGeometries(wallParts, false);  wallParts.forEach(g => g.dispose())
+    if (fm) mapGroup.add(new THREE.Mesh(fm, floorMat))
+    if (wm) mapGroup.add(new THREE.Mesh(wm, wallMat))
+  }
+
+  if (!USE_CONTOUR_WALLS) { buildBoxFallback(); return }
+
+  // -- (4) (5) 抽輪廓 → 簡化 → 內偏 → 分類（外環 / 牆塊環）→ 建 Shape ----
+  const rawRings = extractRings()
+  let rawVerts = 0
+  for (const r of rawRings) rawVerts += r.length
+
+  // 分類：在 y-down lattice 中、可走在邊左側的環，外環會繞成「視覺逆時針」=
+  // 標準 Shoelace 公式得到的 signedArea < 0；內部牆塊環則 > 0。
+  const passOuters: Ring[] = []
+  const wallHoles: Ring[] = []
+  for (const r of rawRings) {
+    const a = signedArea(r)
+    if (a < 0) passOuters.push(r)
+    else if (a > 0) wallHoles.push(r)
+  }
+
+  // 對每個牆塊環找它屬於哪個可走元件（以一個內部點 in-polygon 測試）。
+  function pointInRing(px: number, py: number, ring: Ring): boolean {
+    let inside = false
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i]![0], yi = ring[i]![1]
+      const xj = ring[j]![0], yj = ring[j]![1]
+      const hit = ((yi > py) !== (yj > py)) &&
+                  (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi)
+      if (hit) inside = !inside
+    }
+    return inside
+  }
+  const holesByOuter: Map<number, Ring[]> = new Map()
+  for (let i = 0; i < passOuters.length; i++) holesByOuter.set(i, [])
+  for (const hole of wallHoles) {
+    // 取環內任一點：相鄰兩點中間再朝內偏少許
+    const a = hole[0]!, b = hole[1] ?? hole[0]!
+    const mx = (a[0] + b[0]) / 2 + 0.001
+    const my = (a[1] + b[1]) / 2 + 0.001
+    let owner = -1
+    for (let i = 0; i < passOuters.length; i++) {
+      if (pointInRing(mx, my, passOuters[i]!)) { owner = i; break }
+    }
+    if (owner >= 0) holesByOuter.get(owner)!.push(hole)
+  }
+
+  // 簡化 + 內偏
+  const simpOuters = passOuters.map(r => inwardBias(simplifyRing(r, DP_EPSILON_CELLS), INWARD_BIAS_CELLS))
+  const simpHolesByOuter = new Map<number, Ring[]>()
+  for (const [k, arr] of holesByOuter)
+    simpHolesByOuter.set(k, arr.map(r => inwardBias(simplifyRing(r, DP_EPSILON_CELLS), INWARD_BIAS_CELLS)))
+
+  let simpVerts = 0
+  for (const r of simpOuters) simpVerts += r.length
+  for (const arr of simpHolesByOuter.values()) for (const r of arr) simpVerts += r.length
+
+  // latticeToWorld(p): Vector2(worldX, worldZ)（上方已宣告）。toWorldX/Z 給牆 quad 用。
+  // 地板與牆都用同一組 world XZ 換算，確保兩者對齊；地板 Shape 用 rotateX(+π/2) 讓
+  // shape-y → world-z（不翻轉 Z），與 toWorldZ(p)=p.y*cell-halfH 完全一致。
+  const toWorldX = (p: Pt) => p[0] * dispCell - halfW
+  const toWorldZ = (p: Pt) => p[1] * dispCell - halfH
+
+  // ---- 地板：每個可走元件 = 一個 Shape（outer=外環, holes=內牆塊環），平鋪在 y=0 ----
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
   })
+  const floorParts: THREE.BufferGeometry[] = []
+  for (let i = 0; i < simpOuters.length; i++) {
+    const outer = simpOuters[i]!
+    if (outer.length < 3) continue
+    const shape = new THREE.Shape(outer.map(latticeToWorld))
+    const holes = simpHolesByOuter.get(i) ?? []
+    for (const h of holes) if (h.length >= 3) shape.holes.push(new THREE.Path(h.map(latticeToWorld)))
+    const g = new THREE.ShapeGeometry(shape)
+    // Shape 在 XY 平面、Y=0；rotateX(+π/2) 使 shape-y → world-z（不翻轉），與牆 quad 對齊。
+    // 法線旋轉後朝 -Y，但 floorMat 是 DoubleSide，從上方仍可見。
+    g.rotateX(Math.PI / 2)
+    floorParts.push(g)
+  }
+  const floorMerged = mergeGeometries(floorParts, false)
+  floorParts.forEach(g => g.dispose())
+  if (floorMerged) mapGroup.add(new THREE.Mesh(floorMerged, floorMat))
 
-  // ----- 地板 -----
-  const floorRects = greedyRects(1)
-  if (floorRects.length > 0) {
-    const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x7fb8ff,
-      roughness: 0.85,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-    })
-    const parts: THREE.BufferGeometry[] = []
-    for (const r of floorRects) {
-      const { cx, cz, sx, sz } = rectCenter(r)
-      const g = new THREE.PlaneGeometry(sx, sz)
-      g.rotateX(-Math.PI / 2)
-      g.translate(cx, 0, cz)
-      parts.push(g)
+  // ---- 牆：對每條 ring 的每條邊手動建垂直 quad（避開 ExtrudeGeometry 軸向陷阱） ----
+  // 每條邊 (p1→p2)（可走在左側）建 quad：
+  //   A=(x1,0,z1) B=(x2,0,z2) C=(x2,H,z2) D=(x1,H,z1)
+  // 三角形繞向取 (A,C,B) + (A,D,C)，使法線指向「可走側」(left = (dz,0,-dx))，玩家在可走區看得到牆面。
+  // 牆底 y=0、牆頂 y=wallHeight，與地板 y=0 對齊，不浮空。
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0xf0f3f7, roughness: 0.6, metalness: 0.05,
+  })
+  // 收集所有 ring（外環 + 牆塊環）。兩者抽取時都是「可走在左側」方向，winding 一致。
+  const allRings: Ring[] = [...simpOuters]
+  for (const arr of simpHolesByOuter.values()) for (const r of arr) allRings.push(r)
+
+  let edgeCount = 0
+  for (const r of allRings) if (r.length >= 2) edgeCount += r.length // 封閉環，邊數 = 頂點數
+
+  let wallMerged: THREE.BufferGeometry | null = null
+  let wallQuads = 0
+  if (edgeCount > 0) {
+    const positions = new Float32Array(edgeCount * 6 * 3) // 每 quad 2 三角 = 6 頂點
+    let o = 0
+    const pushV = (x: number, y: number, z: number) => {
+      positions[o++] = x; positions[o++] = y; positions[o++] = z
     }
-    const merged = mergeGeometries(parts, false)
-    parts.forEach((g) => g.dispose())
-    if (merged) {
-      const mesh = new THREE.Mesh(merged, floorMat)
-      mapGroup.add(mesh)
+    for (const ring of allRings) {
+      const n = ring.length
+      if (n < 2) continue
+      for (let i = 0; i < n; i++) {
+        const p1 = ring[i]!
+        const p2 = ring[(i + 1) % n]!
+        const x1 = toWorldX(p1), z1 = toWorldZ(p1)
+        const x2 = toWorldX(p2), z2 = toWorldZ(p2)
+        // A,C,B
+        pushV(x1, 0, z1); pushV(x2, wallHeight, z2); pushV(x2, 0, z2)
+        // A,D,C
+        pushV(x1, 0, z1); pushV(x1, wallHeight, z1); pushV(x2, wallHeight, z2)
+        wallQuads++
+      }
     }
+    wallMerged = new THREE.BufferGeometry()
+    wallMerged.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    wallMerged.computeVertexNormals()
+    mapGroup.add(new THREE.Mesh(wallMerged, wallMat))
   }
 
-  // ----- 牆 -----
-  const wallRects = greedyRects(0)
-  if (wallRects.length > 0) {
-    const wallMat = new THREE.MeshStandardMaterial({
-      color: 0xf0f3f7,
-      roughness: 0.6,
-      metalness: 0.05,
-    })
-    const parts: THREE.BufferGeometry[] = []
-    for (const r of wallRects) {
-      const { cx, cz, sx, sz } = rectCenter(r)
-      const g = new THREE.BoxGeometry(sx, wallHeight, sz)
-      g.translate(cx, wallHeight / 2, cz)
-      parts.push(g)
-    }
-    const merged = mergeGeometries(parts, false)
-    parts.forEach((g) => g.dispose())
-    if (merged) {
-      const mesh = new THREE.Mesh(merged, wallMat)
-      mapGroup.add(mesh)
-    }
+  // 統計輸出（含 bounding box 自查：牆應 y∈[0, wallHeight]、地板應 y≈0）
+  const triCount = (g: THREE.BufferGeometry | null) => {
+    if (!g) return 0
+    if (g.index) return g.index.count / 3
+    return (g.attributes.position?.count ?? 0) / 3
   }
-
-  // 統計輸出：方便 Vercel preview 上對照 perf
-  const cellsTotal = width * height
-  const oldVerts = cellsTotal * 24 // 舊版每 cell 一個 box（24 verts）— 地板獨立 Plane 4 verts 忽略
-  const newVerts = wallRects.length * 24 + floorRects.length * 4
+  const bboxY = (g: THREE.BufferGeometry | null): [number, number] => {
+    if (!g) return [0, 0]
+    g.computeBoundingBox()
+    const b = g.boundingBox
+    return b ? [b.min.y, b.max.y] : [0, 0]
+  }
+  const wallTris = triCount(wallMerged)
+  const floorTris = triCount(floorMerged)
+  const [wMinY, wMaxY] = bboxY(wallMerged)
+  const [fMinY, fMaxY] = bboxY(floorMerged)
   console.log(
-    '[SceneView] greedy meshing: %dx%d grid, walls=%d rects, floor=%d rects; verts %d → %d (%.1f%%)',
-    width,
-    height,
-    wallRects.length,
-    floorRects.length,
-    oldVerts,
-    newVerts,
-    oldVerts > 0 ? (100 * newVerts) / oldVerts : 0,
+    '[SceneView] contour walls: %dx%d grid, rings raw=%d (outer=%d, holes=%d), verts %d → %d (%.1f%% after DP+bias)',
+    width, height,
+    rawRings.length, passOuters.length, wallHoles.length,
+    rawVerts, simpVerts,
+    rawVerts > 0 ? (100 * simpVerts) / rawVerts : 0,
+  )
+  console.log(
+    '[SceneView] geometry: wall quads=%d (tris=%d), floor tris=%d, wallHeight=%.3f | wall bbox.y=[%.3f, %.3f] (expect [0, %.3f]), floor bbox.y=[%.3f, %.3f] (expect ~0)',
+    wallQuads, wallTris, floorTris, wallHeight,
+    wMinY, wMaxY, wallHeight,
+    fMinY, fMaxY,
   )
 }
 
