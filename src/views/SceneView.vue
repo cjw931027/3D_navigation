@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
 
@@ -12,6 +13,8 @@ const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
+// 俯瞰模式的手動相機控制（拖曳旋轉 / 滾輪縮放 / 右鍵平移）。第一人稱時停用。
+let controls: OrbitControls | null = null
 let frameId = 0
 let resizeObserver: ResizeObserver | null = null
 let lastTs = 0
@@ -915,8 +918,8 @@ function animate(ts?: number) {
     tryMove(dt)
     updateOffPath()
   } else {
-    mapGroup.rotation.y += 0.0015
-    pathGroup.rotation.y = mapGroup.rotation.y
+    // 俯瞰模式不再自動旋轉，改由使用者透過 OrbitControls 手動操作。
+    controls?.update()
   }
 
   updateCamera()
@@ -928,6 +931,8 @@ function enterFirstPerson() {
   ensureUserState()
   mapGroup.rotation.y = 0
   pathGroup.rotation.y = 0
+  // 第一人稱由 updateCamera 直接控制相機，停用 OrbitControls 以免互搶。
+  if (controls) controls.enabled = false
 }
 
 function exitFirstPerson() {
@@ -935,6 +940,12 @@ function exitFirstPerson() {
   if (camera) {
     camera.position.set(0, MAP_EXTENT * 0.9, MAP_EXTENT * 1.1)
     camera.lookAt(0, 0, 0)
+  }
+  // 回到俯瞰：重設控制器的對焦中心並重新啟用手動操作。
+  if (controls) {
+    controls.target.set(0, 0, 0)
+    controls.enabled = true
+    controls.update()
   }
 }
 
@@ -1006,6 +1017,16 @@ onMounted(() => {
   renderer.setPixelRatio(window.devicePixelRatio)
   container.value.appendChild(renderer.domElement)
 
+  // 俯瞰模式的手動相機控制：左鍵拖曳旋轉、滾輪/雙指縮放、右鍵或雙指平移。
+  // autoRotate 預設關閉 → 切到 3D 後畫面靜止，由使用者自行操作。
+  controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.dampingFactor = 0.08
+  controls.autoRotate = false
+  controls.target.set(0, 0, 0)
+  controls.enabled = viewMode.value === 'overview'
+  controls.update()
+
   const ambient = new THREE.AmbientLight(0xffffff, 1.1)
   const hemi = new THREE.HemisphereLight(0xffffff, 0x8899aa, 0.9)
   const dir = new THREE.DirectionalLight(0xffffff, 1.4)
@@ -1054,6 +1075,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  controls?.dispose()
   disposeGroup(mapGroup)
   disposeGroup(pathGroup)
   disposeGroup(avatarGroup)
