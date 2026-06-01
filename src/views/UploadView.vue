@@ -41,7 +41,7 @@ let touchStartY = 0
 let didPinch = false
 
 const stepMessages: Record<number, string> = {
-  1: '步驟 1／3　點擊種子點（走廊任意位置）',
+  1: '步驟 1／3　點擊任意可行走區域（走廊任意位置）',
   2: '步驟 2／3　點擊起點',
   3: '步驟 3／3　點擊終點',
   4: '標記完成',
@@ -474,7 +474,7 @@ const goToProcess = () => router.push('/path')
     <!-- 步驟條 -->
     <div class="steps-bar" v-if="selectionStep > 0">
       <div class="step" :class="{ active: selectionStep >= 1, done: selectionStep > 1 }">
-        種子點
+        任意可行走區域
       </div>
       <div class="step-sep">—</div>
       <div class="step" :class="{ active: selectionStep >= 2, done: selectionStep > 2 }">起點</div>
