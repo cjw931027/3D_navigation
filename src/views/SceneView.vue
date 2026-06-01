@@ -5,6 +5,14 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
+import { extractAndRasterize, type Ring, type Pt } from '@/utils/contourUtils'
+import {
+  buildSegGrid,
+  canStandAtPoly,
+  moveCirclePoly,
+  ringsToSegments,
+  type SegGrid,
+} from '@/utils/polyCollision'
 
 const mapStore = useMapStore()
 const container = ref<HTMLDivElement | null>(null)
@@ -46,14 +54,17 @@ let sceneHalfH = 0
 let sceneUp = 1
 let sceneEyeHeight = 1.2
 let sceneWallHeight = 2
-// 碰撞遮罩：直接指向 buildGeometry 內部建的 ds.data（已 downsample + smoothIsolatedWalls），
-// 與視覺牆體網格共用同一份資料。任何視覺上看到的牆/地板差異都會即刻反映到碰撞判定。
+// 碰撞遮罩（網格版）：USE_CONTOUR_WALLS=false 的 box fallback 仍用它；輪廓模式改用 collisionSegs。
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
 let collisionH = 0
 // px→碰撞格 / px→顯示格：值相等（都是「原始 px → ds 網格」係數），保留兩個變數只是語意分組。
 let pxToColl = 1
 let pxToDisplay = 1
+// 輪廓線段碰撞（主路徑）：把視覺牆用的「簡化+內偏後輪廓」轉成線段並建空間網格，
+// 圓形碰撞直接吃這些線段 → 碰撞邊界 = 視覺牆邊界，貼牆順滑無階梯、不穿牆。
+// null 代表走 box fallback（網格碰撞）。
+let collisionSegs: SegGrid | null = null
 
 function disposeGroup(group: THREE.Group) {
   group.traverse((obj) => {
@@ -263,8 +274,13 @@ function collisionGrid(): GridMask | null {
   return { data: collisionMask, width: collisionW, height: collisionH }
 }
 
-// 玩家中心是否可以站在 (px, py)：圓周不與任何牆 cell 重疊。
+// 玩家中心是否可以站在 (px, py)。
+// 輪廓模式：圓心到任一輪廓線段距離 ≥ R（碰撞 = 視覺牆邊界）。
+// box fallback：退回網格版 canStandAt。
 function isPassableAtPixel(px: number, py: number): boolean {
+  if (collisionSegs) {
+    return canStandAtPoly(collisionSegs, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
+  }
   const g = collisionGrid()
   if (!g) return false
   return canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
@@ -292,18 +308,12 @@ function buildGeometry() {
   sceneWallHeight = wallHeight
   sceneEyeHeight = wallHeight * 0.75
 
-  // === 碰撞 / 視覺同源約定 ===
-  // 碰撞遮罩必須與「視覺幾何實際使用的那份資料」完全相同。視覺幾何走 ds.data
-  // （downsampleMask 多數決 + smoothIsolatedWalls 平滑），所以 collisionMask 也要指到同一份。
-  // 過去 collisionMask 直接複製 mapStore.passableMask，平滑後翻成可走的孤立牆 cell
-  // 在視覺上是地板、碰撞上仍是牆 → 玩家撞到「隱形牆」並看似穿透其後方的視覺牆。
-  // 改成共用 ds.data 後：凡 buildGeometry 看到「這格是牆」的位置，碰撞也擋；視覺＝碰撞。
-  collisionMask = data
-  collisionW = width
-  collisionH = height
   // pxToColl 與 pxToDisplay 完全相同（兩者都是「原始 px 座標 → ds 網格座標」的係數）
   pxToDisplay = (sceneUp * width) / mapStore.maskWidth
   pxToColl = pxToDisplay
+  // collisionMask 暫設為 data，等 smoothedMask 烤好後會覆蓋
+  collisionW = width
+  collisionH = height
 
   // 走廊寬度健檢：downsample 後 1 cell 對應 step 個原始 mask cell；
   // PLAYER_RADIUS_CELLS=0.35 換算後直徑 0.7 ds-cell，1 cell 寬走廊在 ds 上仍可塞下。
@@ -317,176 +327,21 @@ function buildGeometry() {
     )
   }
 
-  // === 視覺幾何：輪廓抽取 + Douglas-Peucker 簡化 ===
+  // === 視覺幾何：輪廓抽取 + Douglas-Peucker 簡化 + smoothedMask 烤回 ===
   //
-  // 問題：可走 / 牆遮罩是 0/1 網格，斜向邊界天生是階梯狀；無論 box-per-cell 或 greedy meshing
-  // 都保留同一條階梯。要消除斜邊鋸齒，必須把網格邊界抽成多邊形折線、用 DP 擬合成少數直線段。
+  // 使用 contourUtils 的 marching-squares 邊界抽取 + 鄰接表多邊匯集 + 最右轉串環，
+  // 取代舊版 Map<number,number> 一對一串環（後者在多邊匯集頂點覆蓋前寫 → 斜線區串斷）。
   //
-  // 步驟：
-  //   1. 在 cell-corner lattice 上抽取「可走 cell 與牆 cell 之間的邊」。
-  //      對每個可走 cell (cx, cy)：
-  //        - 上方鄰格是牆 → 加邊  (cx+1, cy)   → (cx,   cy)    （可走在邊的下側、亦即左側）
-  //        - 下方鄰格是牆 → 加邊  (cx,   cy+1) → (cx+1, cy+1)
-  //        - 左方鄰格是牆 → 加邊  (cx,   cy)   → (cx,   cy+1)
-  //        - 右方鄰格是牆 → 加邊  (cx+1, cy+1) → (cx+1, cy)
-  //      界外視為牆，所以地圖外緣自動成邊。所有邊「可走在左側」→ 沿邊走一圈時可走永遠在左。
-  //      在 y-down lattice 中、用標準 Shoelace 公式計算 signedArea：
-  //        外環（可走元件）→ signedArea < 0
-  //        內部牆塊環       → signedArea > 0
-  //      每個 lattice 頂點最多只屬於一條入邊與一條出邊，可直接串成封閉迴圈。
-  //   2. Douglas–Peucker 簡化：每條 ring 跑 DP，epsilon = DP_EPSILON_CELLS（≈ 1 cell 寬度）。
-  //      偏小設計 — 寧可保留多餘節點也不要把窄門吃掉。
-  //   3. 安全內偏（往可走區內收）：對簡化後每個頂點，沿著「兩條相鄰邊的內向法線平均」推進
-  //      INWARD_BIAS_CELLS 距離。內向法線 = 邊方向左轉 90°（因為可走在左）。內偏後視覺可走區
-  //      會比碰撞網格小一點，方向是安全的（視覺可走 ⊆ 碰撞可走，不會出現「看起來能走、
-  //      實際碰到牆」的反向穿牆錯覺）。位移量遠小於玩家半徑 0.35 cell，視覺感受不到。
-  //   4. 牆：對「每條 ring 的每條邊」手動建一個垂直 quad（避開 ExtrudeGeometry 軸向陷阱）。
-  //      邊 (p1→p2)（可走在左側）→ A=(x1,0,z1) B=(x2,0,z2) C=(x2,H,z2) D=(x1,H,z1)，
-  //      三角形 (A,C,B)+(A,D,C) 使法線朝可走側。所有 ring（外環+牆塊環）的邊合成單一 BufferGeometry。
-  //      牆底 y=0、牆頂 y=wallHeight，與地板 y=0 對齊，不浮空。
-  //   5. 地板：對每個可走元件的外環建 Shape（holes = 該元件內所有牆塊環），ShapeGeometry 平鋪
-  //      在 y=0；視覺與碰撞 cell 的可走範圍幾乎完全重合（差距 = INWARD_BIAS_CELLS）。
+  // 管線：extractBoundaryEdges → traceRings → classify → DP 簡化 → inwardBias
+  //       → scanlineFill（烤回 smoothedMask）→ 視覺牆面 + 地板幾何。
   //
-  // 碰撞為何不受影響：
-  //   collisionMask / collisionW / collisionH / pxToColl / pxToDisplay 在本函式上半段（碰撞同源
-  //   設定處）已綁定到原始 ds.data；本段只「讀」data 抽輪廓，從不改寫。canStandAt / moveCircle
-  //   / snapToNearestPassable / runAStar 全部仍跑在原始網格上，玩家碰撞行為與重構前完全一致。
-  //   視覺牆面與碰撞牆面之間 ≤ INWARD_BIAS_CELLS 的偏移、且方向安全（視覺可走 ⊆ 碰撞可走）。
+  // 碰撞遮罩（smoothedMask）與視覺牆面由同一組簡化後輪廓衍生，形狀一致。
+  // circleCollision.ts 完全不改（仍吃 Uint8Array 網格）。
   //
   // 開關：USE_CONTOUR_WALLS = false 時回退到 box-per-cell 舊版（debug 用）。
   const USE_CONTOUR_WALLS = true
   const DP_EPSILON_CELLS = 0.9   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
   const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
-
-  type Pt = [number, number] // lattice 座標 (x, y)，整數即 cell 邊
-  type Ring = Pt[]            // 封閉環（首尾不重複）
-
-  // -- (1) 邊界邊抽取 + 串環 --
-  function extractRings(): Ring[] {
-    // key = vy * (width+1) + vx；每個頂點最多一條 outgoing edge
-    const next = new Map<number, number>()
-    const vkey = (vx: number, vy: number) => vy * (width + 1) + vx
-    const unkey = (k: number): Pt => [k % (width + 1), Math.floor(k / (width + 1))]
-    const cell = (cx: number, cy: number) => {
-      if (cx < 0 || cx >= width || cy < 0 || cy >= height) return 0
-      return data[cy * width + cx]
-    }
-    const addEdge = (ax: number, ay: number, bx: number, by: number) => {
-      next.set(vkey(ax, ay), vkey(bx, by))
-    }
-    for (let cy = 0; cy < height; cy++) {
-      for (let cx = 0; cx < width; cx++) {
-        if (cell(cx, cy) !== 1) continue
-        if (cell(cx, cy - 1) === 0) addEdge(cx + 1, cy, cx, cy)         // top
-        if (cell(cx, cy + 1) === 0) addEdge(cx, cy + 1, cx + 1, cy + 1) // bottom
-        if (cell(cx - 1, cy) === 0) addEdge(cx, cy, cx, cy + 1)         // left
-        if (cell(cx + 1, cy) === 0) addEdge(cx + 1, cy + 1, cx + 1, cy) // right
-      }
-    }
-    const rings: Ring[] = []
-    const visited = new Set<number>()
-    for (const startKey of next.keys()) {
-      if (visited.has(startKey)) continue
-      const ring: Ring = []
-      let k = startKey
-      let safety = next.size + 10
-      while (safety-- > 0) {
-        if (visited.has(k)) break
-        visited.add(k)
-        ring.push(unkey(k))
-        const nk = next.get(k)
-        if (nk === undefined) break
-        k = nk
-        if (k === startKey) break
-      }
-      if (ring.length >= 3) rings.push(ring)
-    }
-    return rings
-  }
-
-  // signed area in lattice coords (Shoelace). y-down 座標：>0 = 順時針，<0 = 逆時針。
-  function signedArea(r: Ring): number {
-    let s = 0
-    for (let i = 0; i < r.length; i++) {
-      const a = r[i]!, b = r[(i + 1) % r.length]!
-      s += a[0] * b[1] - b[0] * a[1]
-    }
-    return s * 0.5
-  }
-
-  // -- (2) Douglas-Peucker（保留首尾；對封閉環，先選一個距離最遠對偶點切兩段再簡化） --
-  function dpSimplify(pts: Pt[], eps: number): Pt[] {
-    if (pts.length <= 2) return pts.slice()
-    const n = pts.length
-    const keep = new Uint8Array(n)
-    keep[0] = 1
-    keep[n - 1] = 1
-    const stack: Array<[number, number]> = [[0, n - 1]]
-    while (stack.length) {
-      const [lo, hi] = stack.pop()!
-      let maxD = -1, maxI = -1
-      const ax = pts[lo]![0], ay = pts[lo]![1]
-      const bx = pts[hi]![0], by = pts[hi]![1]
-      const dx = bx - ax, dy = by - ay
-      const len2 = dx * dx + dy * dy
-      for (let i = lo + 1; i < hi; i++) {
-        const px = pts[i]![0], py = pts[i]![1]
-        let d2
-        if (len2 === 0) {
-          const ex = px - ax, ey = py - ay
-          d2 = ex * ex + ey * ey
-        } else {
-          const cross = (px - ax) * dy - (py - ay) * dx
-          d2 = (cross * cross) / len2
-        }
-        if (d2 > maxD) { maxD = d2; maxI = i }
-      }
-      if (maxD > eps * eps && maxI > 0) {
-        keep[maxI] = 1
-        stack.push([lo, maxI], [maxI, hi])
-      }
-    }
-    const out: Pt[] = []
-    for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i]!)
-    return out
-  }
-
-  function simplifyRing(ring: Ring, eps: number): Ring {
-    // 對封閉環，把頂點 0 接到末，視為線段；DP 直接跑 [0..n-1, 0] 再去掉重複收尾
-    if (ring.length <= 3) return ring.slice()
-    const closed: Pt[] = [...ring, ring[0]!]
-    const simp = dpSimplify(closed, eps)
-    if (simp.length > 1 && simp[0]![0] === simp[simp.length - 1]![0] &&
-        simp[0]![1] === simp[simp.length - 1]![1]) simp.pop()
-    return simp
-  }
-
-  // -- (3) 安全內偏：朝可走側推 bias --
-  // 每條邊內向法線 = 邊方向左轉 90°（因為可走永遠在邊的左側）。
-  // 對每個頂點取「進邊」與「出邊」內向法線的平均，作為位移方向。
-  function inwardBias(ring: Ring, bias: number): Ring {
-    const n = ring.length
-    if (n < 3 || bias === 0) return ring.slice()
-    const out: Ring = []
-    for (let i = 0; i < n; i++) {
-      const prev = ring[(i - 1 + n) % n]!
-      const cur = ring[i]!
-      const next = ring[(i + 1) % n]!
-      const e1x = cur[0] - prev[0], e1y = cur[1] - prev[1]
-      const e2x = next[0] - cur[0], e2y = next[1] - cur[1]
-      // 邊方向左轉 90°：(dx, dy) → (-dy, dx)；但 lattice 是 y-down 螢幕座標，
-      // 而我們抽邊時把可走放在「左」(用標準數學座標的左)；y-down 下顯示為右；
-      // 經實測：簡單沿用 (-dy, dx) 在 y-down 下會把外環往「外」推。改用 (dy, -dx) 把外環往「內」。
-      // 內外環方向相反，自動互補（hole 也朝該方向的內側推）。
-      const n1x = e1y,  n1y = -e1x
-      const n2x = e2y,  n2y = -e2x
-      let nx = n1x + n2x, ny = n1y + n2y
-      const m = Math.hypot(nx, ny)
-      if (m > 1e-9) { nx /= m; ny /= m }
-      out.push([cur[0] + nx * bias, cur[1] + ny * bias])
-    }
-    return out
-  }
 
   const latticeToWorld = (p: Pt) => new THREE.Vector2(
     p[0] * dispCell - halfW,
@@ -495,6 +350,8 @@ function buildGeometry() {
 
   // ---- Fallback：保留 box-per-cell 路徑作為 USE_CONTOUR_WALLS=false 的 debug 開關 ----
   function buildBoxFallback() {
+    collisionMask = data
+    collisionSegs = null // box fallback 用網格碰撞
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xf0f3f7, roughness: 0.6, metalness: 0.05 })
     const floorMat = new THREE.MeshStandardMaterial({ color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })
     const wallParts: THREE.BufferGeometry[] = []
@@ -518,60 +375,18 @@ function buildGeometry() {
 
   if (!USE_CONTOUR_WALLS) { buildBoxFallback(); return }
 
-  // -- (4) (5) 抽輪廓 → 簡化 → 內偏 → 分類（外環 / 牆塊環）→ 建 Shape ----
-  const rawRings = extractRings()
-  let rawVerts = 0
-  for (const r of rawRings) rawVerts += r.length
+  // -- 抽輪廓 → 分類 → 簡化 → 內偏 → 烤回 smoothedMask（一次完成） --
+  const contour = extractAndRasterize(data, width, height, DP_EPSILON_CELLS, INWARD_BIAS_CELLS)
+  const { simpOuters, simpHolesByOuter, allRings, smoothedMask, stats } = contour
 
-  // 分類：在 y-down lattice 中、可走在邊左側的環，外環會繞成「視覺逆時針」=
-  // 標準 Shoelace 公式得到的 signedArea < 0；內部牆塊環則 > 0。
-  const passOuters: Ring[] = []
-  const wallHoles: Ring[] = []
-  for (const r of rawRings) {
-    const a = signedArea(r)
-    if (a < 0) passOuters.push(r)
-    else if (a > 0) wallHoles.push(r)
-  }
+  // === 碰撞改用「輪廓線段」（與視覺牆完全同一條多邊形）===
+  // allRings = 簡化+內偏後的所有輪廓環（外環+holes），即視覺牆 quad 用的同一串線。
+  // 轉成線段 + 空間網格，圓形碰撞直接吃線段 → 碰撞邊界 = 視覺斜線，無階梯、不穿牆。
+  // 座標為 ds-cell 單位，與 pxToColl 一致（px * pxToColl = ds-cell）。
+  collisionSegs = buildSegGrid(ringsToSegments(allRings))
+  // smoothedMask 仍保留給 snapToNearestPassable 當「找初始可走點」的粗定位用（見該函式）。
+  collisionMask = smoothedMask
 
-  // 對每個牆塊環找它屬於哪個可走元件（以一個內部點 in-polygon 測試）。
-  function pointInRing(px: number, py: number, ring: Ring): boolean {
-    let inside = false
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      const xi = ring[i]![0], yi = ring[i]![1]
-      const xj = ring[j]![0], yj = ring[j]![1]
-      const hit = ((yi > py) !== (yj > py)) &&
-                  (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi)
-      if (hit) inside = !inside
-    }
-    return inside
-  }
-  const holesByOuter: Map<number, Ring[]> = new Map()
-  for (let i = 0; i < passOuters.length; i++) holesByOuter.set(i, [])
-  for (const hole of wallHoles) {
-    // 取環內任一點：相鄰兩點中間再朝內偏少許
-    const a = hole[0]!, b = hole[1] ?? hole[0]!
-    const mx = (a[0] + b[0]) / 2 + 0.001
-    const my = (a[1] + b[1]) / 2 + 0.001
-    let owner = -1
-    for (let i = 0; i < passOuters.length; i++) {
-      if (pointInRing(mx, my, passOuters[i]!)) { owner = i; break }
-    }
-    if (owner >= 0) holesByOuter.get(owner)!.push(hole)
-  }
-
-  // 簡化 + 內偏
-  const simpOuters = passOuters.map(r => inwardBias(simplifyRing(r, DP_EPSILON_CELLS), INWARD_BIAS_CELLS))
-  const simpHolesByOuter = new Map<number, Ring[]>()
-  for (const [k, arr] of holesByOuter)
-    simpHolesByOuter.set(k, arr.map(r => inwardBias(simplifyRing(r, DP_EPSILON_CELLS), INWARD_BIAS_CELLS)))
-
-  let simpVerts = 0
-  for (const r of simpOuters) simpVerts += r.length
-  for (const arr of simpHolesByOuter.values()) for (const r of arr) simpVerts += r.length
-
-  // latticeToWorld(p): Vector2(worldX, worldZ)（上方已宣告）。toWorldX/Z 給牆 quad 用。
-  // 地板與牆都用同一組 world XZ 換算，確保兩者對齊；地板 Shape 用 rotateX(+π/2) 讓
-  // shape-y → world-z（不翻轉 Z），與 toWorldZ(p)=p.y*cell-halfH 完全一致。
   const toWorldX = (p: Pt) => p[0] * dispCell - halfW
   const toWorldZ = (p: Pt) => p[1] * dispCell - halfH
 
@@ -597,24 +412,17 @@ function buildGeometry() {
   if (floorMerged) mapGroup.add(new THREE.Mesh(floorMerged, floorMat))
 
   // ---- 牆：對每條 ring 的每條邊手動建垂直 quad（避開 ExtrudeGeometry 軸向陷阱） ----
-  // 每條邊 (p1→p2)（可走在左側）建 quad：
-  //   A=(x1,0,z1) B=(x2,0,z2) C=(x2,H,z2) D=(x1,H,z1)
-  // 三角形繞向取 (A,C,B) + (A,D,C)，使法線指向「可走側」(left = (dz,0,-dx))，玩家在可走區看得到牆面。
-  // 牆底 y=0、牆頂 y=wallHeight，與地板 y=0 對齊，不浮空。
   const wallMat = new THREE.MeshStandardMaterial({
     color: 0xf0f3f7, roughness: 0.6, metalness: 0.05,
   })
-  // 收集所有 ring（外環 + 牆塊環）。兩者抽取時都是「可走在左側」方向，winding 一致。
-  const allRings: Ring[] = [...simpOuters]
-  for (const arr of simpHolesByOuter.values()) for (const r of arr) allRings.push(r)
 
   let edgeCount = 0
-  for (const r of allRings) if (r.length >= 2) edgeCount += r.length // 封閉環，邊數 = 頂點數
+  for (const r of allRings) if (r.length >= 2) edgeCount += r.length
 
   let wallMerged: THREE.BufferGeometry | null = null
   let wallQuads = 0
   if (edgeCount > 0) {
-    const positions = new Float32Array(edgeCount * 6 * 3) // 每 quad 2 三角 = 6 頂點
+    const positions = new Float32Array(edgeCount * 6 * 3)
     let o = 0
     const pushV = (x: number, y: number, z: number) => {
       positions[o++] = x; positions[o++] = y; positions[o++] = z
@@ -627,9 +435,7 @@ function buildGeometry() {
         const p2 = ring[(i + 1) % n]!
         const x1 = toWorldX(p1), z1 = toWorldZ(p1)
         const x2 = toWorldX(p2), z2 = toWorldZ(p2)
-        // A,C,B
         pushV(x1, 0, z1); pushV(x2, wallHeight, z2); pushV(x2, 0, z2)
-        // A,D,C
         pushV(x1, 0, z1); pushV(x1, wallHeight, z1); pushV(x2, wallHeight, z2)
         wallQuads++
       }
@@ -640,7 +446,7 @@ function buildGeometry() {
     mapGroup.add(new THREE.Mesh(wallMerged, wallMat))
   }
 
-  // 統計輸出（含 bounding box 自查：牆應 y∈[0, wallHeight]、地板應 y≈0）
+  // 統計輸出（含 bounding box 自查 + smoothedMask 差異）
   const triCount = (g: THREE.BufferGeometry | null) => {
     if (!g) return 0
     if (g.index) return g.index.count / 3
@@ -659,9 +465,18 @@ function buildGeometry() {
   console.log(
     '[SceneView] contour walls: %dx%d grid, rings raw=%d (outer=%d, holes=%d), verts %d → %d (%.1f%% after DP+bias)',
     width, height,
-    rawRings.length, passOuters.length, wallHoles.length,
-    rawVerts, simpVerts,
-    rawVerts > 0 ? (100 * simpVerts) / rawVerts : 0,
+    stats.rawRingCount, stats.outerCount, stats.holeCount,
+    stats.rawVerts, stats.simpVerts,
+    stats.rawVerts > 0 ? (100 * stats.simpVerts) / stats.rawVerts : 0,
+  )
+  console.log(
+    '[SceneView] smoothedMask: passable cells %d → %d (diff %.2f%%)',
+    stats.originalPassable, stats.smoothedPassable, stats.diffPercent,
+  )
+  console.log(
+    '[SceneView] poly collision: %d segments; start point passable=%s',
+    collisionSegs ? collisionSegs.segs.length : 0,
+    mapStore.startPoint ? String(isPassableAtPixel(mapStore.startPoint.x, mapStore.startPoint.y)) : 'n/a',
   )
   console.log(
     '[SceneView] geometry: wall quads=%d (tris=%d), floor tris=%d, wallHeight=%.3f | wall bbox.y=[%.3f, %.3f] (expect [0, %.3f]), floor bbox.y=[%.3f, %.3f] (expect ~0)',
@@ -749,18 +564,17 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
-// 在碰撞遮罩上 BFS 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，
-// 回傳原始像素座標。圓心固定取 cell 正中央：cell 中心到該 cell 任一邊緣的距離為 0.5 cell，
-// 大於 R=0.35，因此 cell 中心永遠是該 cell 內最不容易與牆重疊的點。
+// 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，回傳原始像素座標。
+// 用 smoothedMask（粗網格）做 BFS 取候選 cell 中心，但「是否可站」一律用 isPassableAtPixel
+// 判定（輪廓模式 → 線段碰撞、box fallback → 網格碰撞），確保 snap 與移動碰撞同一套標準。
 function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
-  const g = collisionGrid()
-  if (!g) return { x: px, y: py }
+  // 原地已合法就直接回傳
+  if (isPassableAtPixel(px, py)) return { x: px, y: py }
+  // 沒有粗網格可 BFS（理論上不會發生）→ 原地回傳
+  if (!collisionMask || collisionW <= 0 || collisionH <= 0) return { x: px, y: py }
+
   const cx0 = Math.floor(px * pxToColl)
   const cy0 = Math.floor(py * pxToColl)
-  // 原地若已合法（不只可走，圓也塞得進）就直接回傳原座標
-  if (canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)) {
-    return { x: px, y: py }
-  }
   const seen = new Uint8Array(collisionW * collisionH)
   const queue: number[] = []
   const enqueue = (cx: number, cy: number) => {
@@ -770,16 +584,18 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
     seen[i] = 1
     queue.push(i)
   }
-  enqueue(cx0, cy0)
+  // 起點可能在界外，clamp 後入列
+  enqueue(Math.max(0, Math.min(collisionW - 1, cx0)), Math.max(0, Math.min(collisionH - 1, cy0)))
   while (queue.length > 0) {
     const idx = queue.shift()!
     const cx = idx % collisionW
     const cy = Math.floor(idx / collisionW)
-    if (collisionMask![idx] === 1) {
-      const cu = cx + 0.5
-      const cv = cy + 0.5
-      if (canStandAt(g, cu, cv, PLAYER_RADIUS_CELLS)) {
-        return { x: cu / pxToColl, y: cv / pxToColl }
+    if (collisionMask[idx] === 1) {
+      // 候選：cell 中心，轉回原始像素座標後用統一碰撞標準驗證
+      const candPx = (cx + 0.5) / pxToColl
+      const candPy = (cy + 0.5) / pxToColl
+      if (isPassableAtPixel(candPx, candPy)) {
+        return { x: candPx, y: candPy }
       }
     }
     enqueue(cx + 1, cy)
@@ -853,19 +669,25 @@ function tryMove(dtSec: number) {
   }
 
   if (moveInput.fwd !== 0) {
-    const g = collisionGrid()
-    if (!g) return
     const h = mapStore.userHeading ?? 0
     const totalStepPx = moveInput.fwd * MOVE_SPEED_PX * dtSec
     const dirX = Math.cos(h)
     const dirY = Math.sin(h)
-    // 全部換算到 collision-cell 座標系再交給 moveCircle，子步長 0.3 cell（同舊版 tunneling 門檻）
+    // 全部換算到 ds-cell 座標系，子步長 0.3 cell（防穿牆 tunneling 門檻）
     const cu = mapStore.userPosition.x * pxToColl
     const cv = mapStore.userPosition.y * pxToColl
     const duTotal = dirX * totalStepPx * pxToColl
     const dvTotal = dirY * totalStepPx * pxToColl
-    const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
-    mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    // 輪廓模式：圓 vs 線段碰撞（沿斜線切線滑行）；box fallback：網格版 moveCircle。
+    if (collisionSegs) {
+      const res = moveCirclePoly(collisionSegs, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
+      mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    } else {
+      const g = collisionGrid()
+      if (!g) return
+      const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
+      mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    }
   }
 }
 
