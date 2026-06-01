@@ -340,7 +340,7 @@ function buildGeometry() {
   //
   // 開關：USE_CONTOUR_WALLS = false 時回退到 box-per-cell 舊版（debug 用）。
   const USE_CONTOUR_WALLS = true
-  const DP_EPSILON_CELLS = 0.9   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
+  const DP_EPSILON_CELLS = 0.8   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
   const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
 
   const latticeToWorld = (p: Pt) => new THREE.Vector2(
