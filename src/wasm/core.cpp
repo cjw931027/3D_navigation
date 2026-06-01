@@ -533,7 +533,6 @@ void removeSmallMaskComponents(std::vector<uint8_t>& mask,
     }
 }
 
-// mode: 0 = RGB 容差（色塊圖），1 = HSL（線稿圖）。
 //   對深色像素做 8 連通域分析，包圍盒最大跨度 < spanThreshold 的視為文字排除，
 //   其餘（真牆壁）列入屏障，dilate 時不得越過。設為 0 等同舊行為（無屏障）。
 void intelligentFloodFill(int width, int height,

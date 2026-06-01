@@ -2,8 +2,17 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
+import { extractAndRasterize, type Ring, type Pt } from '@/utils/contourUtils'
+import {
+  buildSegGrid,
+  canStandAtPoly,
+  moveCirclePoly,
+  ringsToSegments,
+  type SegGrid,
+} from '@/utils/polyCollision'
 
 const mapStore = useMapStore()
 const container = ref<HTMLDivElement | null>(null)
@@ -12,6 +21,8 @@ const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
+// 俯瞰模式的手動相機控制（拖曳旋轉 / 滾輪縮放 / 右鍵平移）。第一人稱時停用。
+let controls: OrbitControls | null = null
 let frameId = 0
 let resizeObserver: ResizeObserver | null = null
 let lastTs = 0
@@ -43,14 +54,17 @@ let sceneHalfH = 0
 let sceneUp = 1
 let sceneEyeHeight = 1.2
 let sceneWallHeight = 2
-// 碰撞遮罩：直接指向 buildGeometry 內部建的 ds.data（已 downsample + smoothIsolatedWalls），
-// 與視覺牆體網格共用同一份資料。任何視覺上看到的牆/地板差異都會即刻反映到碰撞判定。
+// 碰撞遮罩（網格版）：USE_CONTOUR_WALLS=false 的 box fallback 仍用它；輪廓模式改用 collisionSegs。
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
 let collisionH = 0
 // px→碰撞格 / px→顯示格：值相等（都是「原始 px → ds 網格」係數），保留兩個變數只是語意分組。
 let pxToColl = 1
 let pxToDisplay = 1
+// 輪廓線段碰撞（主路徑）：把視覺牆用的「簡化+內偏後輪廓」轉成線段並建空間網格，
+// 圓形碰撞直接吃這些線段 → 碰撞邊界 = 視覺牆邊界，貼牆順滑無階梯、不穿牆。
+// null 代表走 box fallback（網格碰撞）。
+let collisionSegs: SegGrid | null = null
 
 function disposeGroup(group: THREE.Group) {
   group.traverse((obj) => {
@@ -260,8 +274,13 @@ function collisionGrid(): GridMask | null {
   return { data: collisionMask, width: collisionW, height: collisionH }
 }
 
-// 玩家中心是否可以站在 (px, py)：圓周不與任何牆 cell 重疊。
+// 玩家中心是否可以站在 (px, py)。
+// 輪廓模式：圓心到任一輪廓線段距離 ≥ R（碰撞 = 視覺牆邊界）。
+// box fallback：退回網格版 canStandAt。
 function isPassableAtPixel(px: number, py: number): boolean {
+  if (collisionSegs) {
+    return canStandAtPoly(collisionSegs, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
+  }
   const g = collisionGrid()
   if (!g) return false
   return canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
@@ -289,18 +308,12 @@ function buildGeometry() {
   sceneWallHeight = wallHeight
   sceneEyeHeight = wallHeight * 0.75
 
-  // === 碰撞 / 視覺同源約定 ===
-  // 碰撞遮罩必須與「視覺幾何實際使用的那份資料」完全相同。視覺幾何走 ds.data
-  // （downsampleMask 多數決 + smoothIsolatedWalls 平滑），所以 collisionMask 也要指到同一份。
-  // 過去 collisionMask 直接複製 mapStore.passableMask，平滑後翻成可走的孤立牆 cell
-  // 在視覺上是地板、碰撞上仍是牆 → 玩家撞到「隱形牆」並看似穿透其後方的視覺牆。
-  // 改成共用 ds.data 後：凡 buildGeometry 看到「這格是牆」的位置，碰撞也擋；視覺＝碰撞。
-  collisionMask = data
-  collisionW = width
-  collisionH = height
   // pxToColl 與 pxToDisplay 完全相同（兩者都是「原始 px 座標 → ds 網格座標」的係數）
   pxToDisplay = (sceneUp * width) / mapStore.maskWidth
   pxToColl = pxToDisplay
+  // collisionMask 暫設為 data，等 smoothedMask 烤好後會覆蓋
+  collisionW = width
+  collisionH = height
 
   // 走廊寬度健檢：downsample 後 1 cell 對應 step 個原始 mask cell；
   // PLAYER_RADIUS_CELLS=0.35 換算後直徑 0.7 ds-cell，1 cell 寬走廊在 ds 上仍可塞下。
@@ -314,114 +327,162 @@ function buildGeometry() {
     )
   }
 
-  // === Greedy meshing：把連續同類 cell 合併成大矩形，再用 mergeGeometries 變成單一 Mesh ===
-  // 目的：(1) 消除「box-per-cell」拼接接縫造成的階梯顆粒（長牆變成單一光滑平面）；
-  //      (2) 把頂點數從 cellCount × 24 壓到 rectCount × 24（典型壓縮 10~50 倍），手機友善。
-  // 演算法（標準 2D greedy meshing）：
-  //   對每個未訪問且符合 target（0=牆 / 1=地板）的 cell (y,x)，
-  //   先沿同 row 往右找最長連續 run 寬 W（同 target 且未訪問），
-  //   再往下找最長高度 H（每一 row 的 [x..x+W) 都同 target 且未訪問），
-  //   標記訪問，吐出 rect {x, y, w:W, h:H}。
-  // 保證視覺位置一致：rect (x,y,w,h) 的世界座標 = 原本 (x..x+w-1, y..y+h-1) 每個 cell box 各自的中心
-  // 合併後的等效矩形 — 中心 ((x + w/2)*dispCell - halfW, …, (y + h/2)*dispCell - halfH)、
-  // 尺寸 (w*dispCell, *, h*dispCell)；當 w=h=1 退化為舊版的「中心 (x+0.5)*dispCell - halfW」。
-  // 碰撞不受影響：上面已把 collisionMask = data 設好；greedyRects 只讀 data、不改它，碰撞網格與
-  // 座標映射（pxToColl/pxToDisplay）都不動，玩家依然是逐 cell 圓形碰撞。
-  function greedyRects(target: 0 | 1): Array<{ x: number; y: number; w: number; h: number }> {
-    const visited = new Uint8Array(width * height)
-    const out: Array<{ x: number; y: number; w: number; h: number }> = []
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x
-        if (visited[i]) continue
-        if (data[i] !== target) { visited[i] = 1; continue }
-        let w = 1
-        while (x + w < width && !visited[i + w] && data[i + w] === target) w++
-        let h = 1
-        outer: while (y + h < height) {
-          for (let k = 0; k < w; k++) {
-            const j = (y + h) * width + (x + k)
-            if (visited[j] || data[j] !== target) break outer
-          }
-          h++
-        }
-        for (let dy = 0; dy < h; dy++)
-          for (let dx = 0; dx < w; dx++)
-            visited[(y + dy) * width + (x + dx)] = 1
-        out.push({ x, y, w, h })
+  // === 視覺幾何：輪廓抽取 + Douglas-Peucker 簡化 + smoothedMask 烤回 ===
+  //
+  // 使用 contourUtils 的 marching-squares 邊界抽取 + 鄰接表多邊匯集 + 最右轉串環，
+  // 取代舊版 Map<number,number> 一對一串環（後者在多邊匯集頂點覆蓋前寫 → 斜線區串斷）。
+  //
+  // 管線：extractBoundaryEdges → traceRings → classify → DP 簡化 → inwardBias
+  //       → scanlineFill（烤回 smoothedMask）→ 視覺牆面 + 地板幾何。
+  //
+  // 碰撞遮罩（smoothedMask）與視覺牆面由同一組簡化後輪廓衍生，形狀一致。
+  // circleCollision.ts 完全不改（仍吃 Uint8Array 網格）。
+  //
+  // 開關：USE_CONTOUR_WALLS = false 時回退到 box-per-cell 舊版（debug 用）。
+  const USE_CONTOUR_WALLS = true
+  const DP_EPSILON_CELLS = 0.8   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
+  const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
+
+  const latticeToWorld = (p: Pt) => new THREE.Vector2(
+    p[0] * dispCell - halfW,
+    p[1] * dispCell - halfH,
+  )
+
+  // ---- Fallback：保留 box-per-cell 路徑作為 USE_CONTOUR_WALLS=false 的 debug 開關 ----
+  function buildBoxFallback() {
+    collisionMask = data
+    collisionSegs = null // box fallback 用網格碰撞
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf0f3f7, roughness: 0.6, metalness: 0.05 })
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })
+    const wallParts: THREE.BufferGeometry[] = []
+    const floorParts: THREE.BufferGeometry[] = []
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const cx = (x + 0.5) * dispCell - halfW
+      const cz = (y + 0.5) * dispCell - halfH
+      if (data[y * width + x] === 1) {
+        const g = new THREE.PlaneGeometry(dispCell, dispCell)
+        g.rotateX(-Math.PI / 2); g.translate(cx, 0, cz); floorParts.push(g)
+      } else {
+        const g = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
+        g.translate(cx, wallHeight / 2, cz); wallParts.push(g)
       }
     }
-    return out
+    const fm = mergeGeometries(floorParts, false); floorParts.forEach(g => g.dispose())
+    const wm = mergeGeometries(wallParts, false);  wallParts.forEach(g => g.dispose())
+    if (fm) mapGroup.add(new THREE.Mesh(fm, floorMat))
+    if (wm) mapGroup.add(new THREE.Mesh(wm, wallMat))
   }
 
-  const rectCenter = (r: { x: number; y: number; w: number; h: number }) => ({
-    cx: (r.x + r.w / 2) * dispCell - halfW,
-    cz: (r.y + r.h / 2) * dispCell - halfH,
-    sx: r.w * dispCell,
-    sz: r.h * dispCell,
+  if (!USE_CONTOUR_WALLS) { buildBoxFallback(); return }
+
+  // -- 抽輪廓 → 分類 → 簡化 → 內偏 → 烤回 smoothedMask（一次完成） --
+  const contour = extractAndRasterize(data, width, height, DP_EPSILON_CELLS, INWARD_BIAS_CELLS)
+  const { simpOuters, simpHolesByOuter, allRings, smoothedMask, stats } = contour
+
+  // === 碰撞改用「輪廓線段」（與視覺牆完全同一條多邊形）===
+  // allRings = 簡化+內偏後的所有輪廓環（外環+holes），即視覺牆 quad 用的同一串線。
+  // 轉成線段 + 空間網格，圓形碰撞直接吃線段 → 碰撞邊界 = 視覺斜線，無階梯、不穿牆。
+  // 座標為 ds-cell 單位，與 pxToColl 一致（px * pxToColl = ds-cell）。
+  collisionSegs = buildSegGrid(ringsToSegments(allRings))
+  // smoothedMask 仍保留給 snapToNearestPassable 當「找初始可走點」的粗定位用（見該函式）。
+  collisionMask = smoothedMask
+
+  const toWorldX = (p: Pt) => p[0] * dispCell - halfW
+  const toWorldZ = (p: Pt) => p[1] * dispCell - halfH
+
+  // ---- 地板：每個可走元件 = 一個 Shape（outer=外環, holes=內牆塊環），平鋪在 y=0 ----
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
+  })
+  const floorParts: THREE.BufferGeometry[] = []
+  for (let i = 0; i < simpOuters.length; i++) {
+    const outer = simpOuters[i]!
+    if (outer.length < 3) continue
+    const shape = new THREE.Shape(outer.map(latticeToWorld))
+    const holes = simpHolesByOuter.get(i) ?? []
+    for (const h of holes) if (h.length >= 3) shape.holes.push(new THREE.Path(h.map(latticeToWorld)))
+    const g = new THREE.ShapeGeometry(shape)
+    // Shape 在 XY 平面、Y=0；rotateX(+π/2) 使 shape-y → world-z（不翻轉），與牆 quad 對齊。
+    // 法線旋轉後朝 -Y，但 floorMat 是 DoubleSide，從上方仍可見。
+    g.rotateX(Math.PI / 2)
+    floorParts.push(g)
+  }
+  const floorMerged = mergeGeometries(floorParts, false)
+  floorParts.forEach(g => g.dispose())
+  if (floorMerged) mapGroup.add(new THREE.Mesh(floorMerged, floorMat))
+
+  // ---- 牆：對每條 ring 的每條邊手動建垂直 quad（避開 ExtrudeGeometry 軸向陷阱） ----
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0xf0f3f7, roughness: 0.6, metalness: 0.05,
   })
 
-  // ----- 地板 -----
-  const floorRects = greedyRects(1)
-  if (floorRects.length > 0) {
-    const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x7fb8ff,
-      roughness: 0.85,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-    })
-    const parts: THREE.BufferGeometry[] = []
-    for (const r of floorRects) {
-      const { cx, cz, sx, sz } = rectCenter(r)
-      const g = new THREE.PlaneGeometry(sx, sz)
-      g.rotateX(-Math.PI / 2)
-      g.translate(cx, 0, cz)
-      parts.push(g)
+  let edgeCount = 0
+  for (const r of allRings) if (r.length >= 2) edgeCount += r.length
+
+  let wallMerged: THREE.BufferGeometry | null = null
+  let wallQuads = 0
+  if (edgeCount > 0) {
+    const positions = new Float32Array(edgeCount * 6 * 3)
+    let o = 0
+    const pushV = (x: number, y: number, z: number) => {
+      positions[o++] = x; positions[o++] = y; positions[o++] = z
     }
-    const merged = mergeGeometries(parts, false)
-    parts.forEach((g) => g.dispose())
-    if (merged) {
-      const mesh = new THREE.Mesh(merged, floorMat)
-      mapGroup.add(mesh)
+    for (const ring of allRings) {
+      const n = ring.length
+      if (n < 2) continue
+      for (let i = 0; i < n; i++) {
+        const p1 = ring[i]!
+        const p2 = ring[(i + 1) % n]!
+        const x1 = toWorldX(p1), z1 = toWorldZ(p1)
+        const x2 = toWorldX(p2), z2 = toWorldZ(p2)
+        pushV(x1, 0, z1); pushV(x2, wallHeight, z2); pushV(x2, 0, z2)
+        pushV(x1, 0, z1); pushV(x1, wallHeight, z1); pushV(x2, wallHeight, z2)
+        wallQuads++
+      }
     }
+    wallMerged = new THREE.BufferGeometry()
+    wallMerged.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    wallMerged.computeVertexNormals()
+    mapGroup.add(new THREE.Mesh(wallMerged, wallMat))
   }
 
-  // ----- 牆 -----
-  const wallRects = greedyRects(0)
-  if (wallRects.length > 0) {
-    const wallMat = new THREE.MeshStandardMaterial({
-      color: 0xf0f3f7,
-      roughness: 0.6,
-      metalness: 0.05,
-    })
-    const parts: THREE.BufferGeometry[] = []
-    for (const r of wallRects) {
-      const { cx, cz, sx, sz } = rectCenter(r)
-      const g = new THREE.BoxGeometry(sx, wallHeight, sz)
-      g.translate(cx, wallHeight / 2, cz)
-      parts.push(g)
-    }
-    const merged = mergeGeometries(parts, false)
-    parts.forEach((g) => g.dispose())
-    if (merged) {
-      const mesh = new THREE.Mesh(merged, wallMat)
-      mapGroup.add(mesh)
-    }
+  // 統計輸出（含 bounding box 自查 + smoothedMask 差異）
+  const triCount = (g: THREE.BufferGeometry | null) => {
+    if (!g) return 0
+    if (g.index) return g.index.count / 3
+    return (g.attributes.position?.count ?? 0) / 3
   }
-
-  // 統計輸出：方便 Vercel preview 上對照 perf
-  const cellsTotal = width * height
-  const oldVerts = cellsTotal * 24 // 舊版每 cell 一個 box（24 verts）— 地板獨立 Plane 4 verts 忽略
-  const newVerts = wallRects.length * 24 + floorRects.length * 4
+  const bboxY = (g: THREE.BufferGeometry | null): [number, number] => {
+    if (!g) return [0, 0]
+    g.computeBoundingBox()
+    const b = g.boundingBox
+    return b ? [b.min.y, b.max.y] : [0, 0]
+  }
+  const wallTris = triCount(wallMerged)
+  const floorTris = triCount(floorMerged)
+  const [wMinY, wMaxY] = bboxY(wallMerged)
+  const [fMinY, fMaxY] = bboxY(floorMerged)
   console.log(
-    '[SceneView] greedy meshing: %dx%d grid, walls=%d rects, floor=%d rects; verts %d → %d (%.1f%%)',
-    width,
-    height,
-    wallRects.length,
-    floorRects.length,
-    oldVerts,
-    newVerts,
-    oldVerts > 0 ? (100 * newVerts) / oldVerts : 0,
+    '[SceneView] contour walls: %dx%d grid, rings raw=%d (outer=%d, holes=%d), verts %d → %d (%.1f%% after DP+bias)',
+    width, height,
+    stats.rawRingCount, stats.outerCount, stats.holeCount,
+    stats.rawVerts, stats.simpVerts,
+    stats.rawVerts > 0 ? (100 * stats.simpVerts) / stats.rawVerts : 0,
+  )
+  console.log(
+    '[SceneView] smoothedMask: passable cells %d → %d (diff %.2f%%)',
+    stats.originalPassable, stats.smoothedPassable, stats.diffPercent,
+  )
+  console.log(
+    '[SceneView] poly collision: %d segments; start point passable=%s',
+    collisionSegs ? collisionSegs.segs.length : 0,
+    mapStore.startPoint ? String(isPassableAtPixel(mapStore.startPoint.x, mapStore.startPoint.y)) : 'n/a',
+  )
+  console.log(
+    '[SceneView] geometry: wall quads=%d (tris=%d), floor tris=%d, wallHeight=%.3f | wall bbox.y=[%.3f, %.3f] (expect [0, %.3f]), floor bbox.y=[%.3f, %.3f] (expect ~0)',
+    wallQuads, wallTris, floorTris, wallHeight,
+    wMinY, wMaxY, wallHeight,
+    fMinY, fMaxY,
   )
 }
 
@@ -503,18 +564,17 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
-// 在碰撞遮罩上 BFS 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，
-// 回傳原始像素座標。圓心固定取 cell 正中央：cell 中心到該 cell 任一邊緣的距離為 0.5 cell，
-// 大於 R=0.35，因此 cell 中心永遠是該 cell 內最不容易與牆重疊的點。
+// 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，回傳原始像素座標。
+// 用 smoothedMask（粗網格）做 BFS 取候選 cell 中心，但「是否可站」一律用 isPassableAtPixel
+// 判定（輪廓模式 → 線段碰撞、box fallback → 網格碰撞），確保 snap 與移動碰撞同一套標準。
 function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
-  const g = collisionGrid()
-  if (!g) return { x: px, y: py }
+  // 原地已合法就直接回傳
+  if (isPassableAtPixel(px, py)) return { x: px, y: py }
+  // 沒有粗網格可 BFS（理論上不會發生）→ 原地回傳
+  if (!collisionMask || collisionW <= 0 || collisionH <= 0) return { x: px, y: py }
+
   const cx0 = Math.floor(px * pxToColl)
   const cy0 = Math.floor(py * pxToColl)
-  // 原地若已合法（不只可走，圓也塞得進）就直接回傳原座標
-  if (canStandAt(g, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)) {
-    return { x: px, y: py }
-  }
   const seen = new Uint8Array(collisionW * collisionH)
   const queue: number[] = []
   const enqueue = (cx: number, cy: number) => {
@@ -524,16 +584,18 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
     seen[i] = 1
     queue.push(i)
   }
-  enqueue(cx0, cy0)
+  // 起點可能在界外，clamp 後入列
+  enqueue(Math.max(0, Math.min(collisionW - 1, cx0)), Math.max(0, Math.min(collisionH - 1, cy0)))
   while (queue.length > 0) {
     const idx = queue.shift()!
     const cx = idx % collisionW
     const cy = Math.floor(idx / collisionW)
-    if (collisionMask![idx] === 1) {
-      const cu = cx + 0.5
-      const cv = cy + 0.5
-      if (canStandAt(g, cu, cv, PLAYER_RADIUS_CELLS)) {
-        return { x: cu / pxToColl, y: cv / pxToColl }
+    if (collisionMask[idx] === 1) {
+      // 候選：cell 中心，轉回原始像素座標後用統一碰撞標準驗證
+      const candPx = (cx + 0.5) / pxToColl
+      const candPy = (cy + 0.5) / pxToColl
+      if (isPassableAtPixel(candPx, candPy)) {
+        return { x: candPx, y: candPy }
       }
     }
     enqueue(cx + 1, cy)
@@ -607,19 +669,25 @@ function tryMove(dtSec: number) {
   }
 
   if (moveInput.fwd !== 0) {
-    const g = collisionGrid()
-    if (!g) return
     const h = mapStore.userHeading ?? 0
     const totalStepPx = moveInput.fwd * MOVE_SPEED_PX * dtSec
     const dirX = Math.cos(h)
     const dirY = Math.sin(h)
-    // 全部換算到 collision-cell 座標系再交給 moveCircle，子步長 0.3 cell（同舊版 tunneling 門檻）
+    // 全部換算到 ds-cell 座標系，子步長 0.3 cell（防穿牆 tunneling 門檻）
     const cu = mapStore.userPosition.x * pxToColl
     const cv = mapStore.userPosition.y * pxToColl
     const duTotal = dirX * totalStepPx * pxToColl
     const dvTotal = dirY * totalStepPx * pxToColl
-    const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
-    mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    // 輪廓模式：圓 vs 線段碰撞（沿斜線切線滑行）；box fallback：網格版 moveCircle。
+    if (collisionSegs) {
+      const res = moveCirclePoly(collisionSegs, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
+      mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    } else {
+      const g = collisionGrid()
+      if (!g) return
+      const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
+      mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    }
   }
 }
 
@@ -672,8 +740,8 @@ function animate(ts?: number) {
     tryMove(dt)
     updateOffPath()
   } else {
-    mapGroup.rotation.y += 0.0015
-    pathGroup.rotation.y = mapGroup.rotation.y
+    // 俯瞰模式不再自動旋轉，改由使用者透過 OrbitControls 手動操作。
+    controls?.update()
   }
 
   updateCamera()
@@ -685,6 +753,8 @@ function enterFirstPerson() {
   ensureUserState()
   mapGroup.rotation.y = 0
   pathGroup.rotation.y = 0
+  // 第一人稱由 updateCamera 直接控制相機，停用 OrbitControls 以免互搶。
+  if (controls) controls.enabled = false
 }
 
 function exitFirstPerson() {
@@ -692,6 +762,12 @@ function exitFirstPerson() {
   if (camera) {
     camera.position.set(0, MAP_EXTENT * 0.9, MAP_EXTENT * 1.1)
     camera.lookAt(0, 0, 0)
+  }
+  // 回到俯瞰：重設控制器的對焦中心並重新啟用手動操作。
+  if (controls) {
+    controls.target.set(0, 0, 0)
+    controls.enabled = true
+    controls.update()
   }
 }
 
@@ -763,6 +839,16 @@ onMounted(() => {
   renderer.setPixelRatio(window.devicePixelRatio)
   container.value.appendChild(renderer.domElement)
 
+  // 俯瞰模式的手動相機控制：左鍵拖曳旋轉、滾輪/雙指縮放、右鍵或雙指平移。
+  // autoRotate 預設關閉 → 切到 3D 後畫面靜止，由使用者自行操作。
+  controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.dampingFactor = 0.08
+  controls.autoRotate = false
+  controls.target.set(0, 0, 0)
+  controls.enabled = viewMode.value === 'overview'
+  controls.update()
+
   const ambient = new THREE.AmbientLight(0xffffff, 1.1)
   const hemi = new THREE.HemisphereLight(0xffffff, 0x8899aa, 0.9)
   const dir = new THREE.DirectionalLight(0xffffff, 1.4)
@@ -811,6 +897,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  controls?.dispose()
   disposeGroup(mapGroup)
   disposeGroup(pathGroup)
   disposeGroup(avatarGroup)
