@@ -41,12 +41,58 @@ const WALL_HEIGHT_RATIO = 2.0
 const MAX_CELLS_LONG_SIDE = 200
 
 const viewMode = ref<'overview' | 'first-person'>('overview')
-// 第一人稱移動輸入以 -1/0/1 表示方向，animation loop 依 dt 積分成位移。
-const moveInput = reactive({ fwd: 0, rot: 0 })
+// 第一人稱移動/轉向輸入。移動與視角朝向「解耦」（方案 A）：
+//   fwd    : 前進(+)/後退(-)，沿視角前方。範圍 [-1,1]（搖桿類比；鍵盤給 ±1）。
+//   strafe : 右側移(+)/左側移(-)，沿視角右方，「不」改變視角朝向。範圍 [-1,1]。
+//   rot    : 轉視角(+右/-左)，僅鍵盤 A/D/←/→ 使用（離散 ±1）。觸控轉視角不走這裡，
+//            而是直接累加 userHeading（見 onLookMove），兩條路徑共用 userHeading 不互相覆蓋。
+// animation loop 依 dt 把 fwd/strafe 積分成位移、把 rot 積分成 heading 增量。
+//
+// 鍵盤與搖桿「不互相覆蓋」：分別存到 keyInput 與 joystick，每幀在 syncMoveInput() 合併成
+// moveInput。fwd/strafe 取「絕對值較大者」（讓任一輸入源都能單獨驅動，且搖桿類比量不會被
+// 鍵盤的 ±1 永遠壓過、鍵盤也不會被靜止的搖桿歸零）；rot 只有鍵盤會用。
+const moveInput = reactive({ fwd: 0, strafe: 0, rot: 0 })
+// 鍵盤輸入（離散）：fwd ∈ {-1,0,1}（W/S），rot ∈ {-1,0,1}（A/D 轉視角）。鍵盤不出 strafe。
+const keyInput = reactive({ fwd: 0, rot: 0 })
 const offPath = ref(false)
 const OFF_PATH_THRESHOLD_PX = 18
 const MOVE_SPEED_PX = 30
 const ROT_SPEED = Math.PI * 0.9
+// 觸控滑屏轉視角靈敏度：每 1 CSS px 的水平位移 → userHeading 增加多少弧度。
+// 調大 = 轉更快。0.005 rad/px ≈ 滑半個 360px 寬手機螢幕轉約 100°，手感適中。
+const LOOK_SENSITIVITY = 0.005
+// 搖桿死區：正規化半徑 < 此值時視為回中（0），避免手指輕觸造成漂移。
+const JOYSTICK_DEADZONE = 0.15
+
+// === 虛擬搖桿狀態（浮動式：按下即在手指處生成）===
+// jx/jy ∈ [-1,1]：以底座中心為原點、正規化到單位圓的搖桿頭偏移（已夾住、未套死區）。
+//   jx：右(+)/左(-)；jy：上(+,前進)/下(-,後退)（畫面 y 往下為正，故取負後對應前進）。
+// active：搖桿是否被按住（true=浮動在手指處且不透明；false=回到 idle 預設位置半透明）。
+// knobX/knobY：搖桿頭相對底座中心的「像素」位移，純視覺，給 template 綁 transform。
+// baseX/baseY：底座中心的螢幕座標（active 時 = 手指按下處）。idle 時走 CSS 預設位置，
+//   故 baseX/baseY 僅在 active 時用於 inline 定位（見 template 的 :style 條件）。
+const joystick = reactive({ jx: 0, jy: 0, active: false, knobX: 0, knobY: 0, baseX: 0, baseY: 0 })
+// debug 疊層：顯示目前 (jx, jy) 與 userHeading。預設關閉（正式使用不需要、手機尺寸會被底部按鈕擋）；
+// 將來除錯可手動把此值改 true 或在 console 設定。.touch-debug 元件本身保留。
+const showDebug = ref(false)
+const debugHeading = ref(0)
+// template 不可直接用 Math，這裡把 heading 轉成度數字串供 debug 疊層顯示。
+const debugHeadingDeg = computed(() => ((debugHeading.value * 180) / Math.PI).toFixed(0))
+
+// 搖桿底座半徑（CSS px）——視覺底座尺寸（直徑 = 2×此值），須與 style 的 .joystick-base 尺寸一致。
+const JOYSTICK_BASE_RADIUS = 60
+// 搖桿頭最大可離開中心的像素（略小於底座半徑，留邊）。pointermove 正規化以此為準。
+const JOYSTICK_KNOB_RANGE = 44
+
+// 多點觸控分流：分別記錄「搖桿手指」與「轉視角手指」的 pointerId，允許左手搖桿 + 右手滑屏同時。
+// null 代表該角色目前沒有手指佔用。絕不可用單一全域 pointer 狀態，否則第二指會搶走第一指。
+let joystickPointerId: number | null = null
+let lookPointerId: number | null = null
+// 轉視角手指的上一個 clientX，用來算每次 move 的水平位移量（delta）。
+let lookLastX = 0
+// 搖桿底座中心的螢幕座標。浮動式：pointerdown 當下記錄「手指按下處」，move 時據此算偏移。
+let joystickCenterX = 0
+let joystickCenterY = 0
 
 let sceneCellSize = 0
 let sceneHalfW = 0
@@ -274,11 +320,26 @@ function collisionGrid(): GridMask | null {
   return { data: collisionMask, width: collisionW, height: collisionH }
 }
 
+// (px,py) 換算後的 ds-cell 是否落在「可走區內部」（smoothedMask = 輪廓多邊形的柵格化，
+// 即視覺地板覆蓋的格子）。這是 canStandAtPoly 缺的那一半判定：
+//   canStandAtPoly 只檢查「圓心到線段距離 ≥ R」，對「地圖外的空曠處」（附近沒有任何線段）
+//   會誤判為可站（距離無限大 ≥ R）。加上「必須在 smoothedMask 內」才能排除界外點。
+function isInsideWalkable(px: number, py: number): boolean {
+  if (!collisionMask || collisionW <= 0 || collisionH <= 0) return false
+  const cx = Math.floor(px * pxToColl)
+  const cy = Math.floor(py * pxToColl)
+  if (cx < 0 || cx >= collisionW || cy < 0 || cy >= collisionH) return false
+  return collisionMask[cy * collisionW + cx] === 1
+}
+
 // 玩家中心是否可以站在 (px, py)。
-// 輪廓模式：圓心到任一輪廓線段距離 ≥ R（碰撞 = 視覺牆邊界）。
-// box fallback：退回網格版 canStandAt。
+// 輪廓模式：兩個條件都要過 —
+//   (a) 圓心落在可走區內部（isInsideWalkable，排除地圖外空曠處被誤判可站）；
+//   (b) 圓心到任一輪廓線段距離 ≥ R（canStandAtPoly，碰撞 = 視覺牆邊界、不穿牆）。
+// box fallback：退回網格版 canStandAt（其網格判定本身已含界外=牆，不需 (a)）。
 function isPassableAtPixel(px: number, py: number): boolean {
   if (collisionSegs) {
+    if (!isInsideWalkable(px, py)) return false
     return canStandAtPoly(collisionSegs, px * pxToColl, py * pxToColl, PLAYER_RADIUS_CELLS)
   }
   const g = collisionGrid()
@@ -564,17 +625,86 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
-// 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的位置，回傳原始像素座標。
-// 用 smoothedMask（粗網格）做 BFS 取候選 cell 中心，但「是否可站」一律用 isPassableAtPixel
-// 判定（輪廓模式 → 線段碰撞、box fallback → 網格碰撞），確保 snap 與移動碰撞同一套標準。
+// 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的合法位置，回原始像素座標。
+//
+// 修法（取代舊版「BFS 取第一個 cell 中心」）：
+//   舊版只取每個 cell 的「中心」驗證、且回「BFS 順序第一個」通過者。問題：
+//     - 半徑 0.35 cell 在貼牆走道中，cell 中心常剛好離牆 < R → 該 cell 整顆被否決，
+//       BFS 可能略過真正最近的合法落點（其實只需在 cell 內偏一點點）。
+//     - 全找不到時回傳原始點（可能在地圖外）→ 玩家被丟到界外、走不動。
+//   新版：
+//     1. 候選來源 = A* pathNodes（保證在路線上、可走）優先，再加 smoothedMask 可走 cell；
+//        smoothedMask 是輪廓多邊形柵格化，必在可走區內部 → 不會選到界外。
+//     2. 每個可走 cell 做 3×3 子取樣（不只中心），用 isPassableAtPixel 驗證（內部 + 圓不撞牆）。
+//     3. 取「離目標最近」的合法點（全域最小距離），不是 BFS 第一個。
+//     4. 完全找不到合法落點時，退回「最近的可走 cell 中心」（至少在地圖內），並 warn。
 function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
   // 原地已合法就直接回傳
   if (isPassableAtPixel(px, py)) return { x: px, y: py }
-  // 沒有粗網格可 BFS（理論上不會發生）→ 原地回傳
   if (!collisionMask || collisionW <= 0 || collisionH <= 0) return { x: px, y: py }
 
-  const cx0 = Math.floor(px * pxToColl)
-  const cy0 = Math.floor(py * pxToColl)
+  const tx = px * pxToColl // 目標（ds-cell 座標），用來比距離
+  const ty = py * pxToColl
+
+  let bestValid: { x: number; y: number } | null = null
+  let bestValidD2 = Infinity
+  let bestInside: { x: number; y: number } | null = null // 退路：最近的可走 cell 中心
+  let bestInsideD2 = Infinity
+
+  const consider = (cellCx: number, cellCy: number) => {
+    if (cellCx < 0 || cellCx >= collisionW || cellCy < 0 || cellCy >= collisionH) return
+    if (collisionMask![cellCy * collisionW + cellCx] !== 1) return
+    // 記錄最近可走 cell 中心當退路
+    {
+      const dcx = cellCx + 0.5 - tx
+      const dcy = cellCy + 0.5 - ty
+      const d2 = dcx * dcx + dcy * dcy
+      if (d2 < bestInsideD2) {
+        bestInsideD2 = d2
+        bestInside = { x: (cellCx + 0.5) / pxToColl, y: (cellCy + 0.5) / pxToColl }
+      }
+    }
+    // 3×3 子取樣（cell 內 0.2/0.5/0.8 處），逐一驗證並取最近合法
+    for (let sy = 0; sy < 3; sy++) {
+      for (let sx = 0; sx < 3; sx++) {
+        const cu = cellCx + 0.2 + 0.3 * sx
+        const cv = cellCy + 0.2 + 0.3 * sy
+        const candPx = cu / pxToColl
+        const candPy = cv / pxToColl
+        if (!isPassableAtPixel(candPx, candPy)) continue
+        const d2 = (cu - tx) * (cu - tx) + (cv - ty) * (cv - ty)
+        if (d2 < bestValidD2) {
+          bestValidD2 = d2
+          bestValid = { x: candPx, y: candPy }
+        }
+      }
+    }
+  }
+
+  // 1) A* pathNodes 優先（這些點在路線上、必在可走區）。轉成 cell 後納入考量。
+  const nodes = mapStore.pathNodes
+  if (nodes && nodes.length > 0) {
+    for (const nd of nodes) {
+      consider(Math.floor(nd.x * pxToColl), Math.floor(nd.y * pxToColl))
+    }
+    // pathNodes 本身也直接當候選驗證（不限 cell 中心）
+    for (const nd of nodes) {
+      if (isPassableAtPixel(nd.x, nd.y)) {
+        const cu = nd.x * pxToColl
+        const cv = nd.y * pxToColl
+        const d2 = (cu - tx) * (cu - tx) + (cv - ty) * (cv - ty)
+        if (d2 < bestValidD2) {
+          bestValidD2 = d2
+          bestValid = { x: nd.x, y: nd.y }
+        }
+      }
+    }
+  }
+
+  // 2) BFS 掃 smoothedMask 可走 cell（由目標 clamp 後出發），逐一 consider。
+  //    不在找到第一個就停 —— 掃完一個「足夠大」的環以確保拿到全域最近合法點。
+  const cx0 = Math.max(0, Math.min(collisionW - 1, Math.floor(px * pxToColl)))
+  const cy0 = Math.max(0, Math.min(collisionH - 1, Math.floor(py * pxToColl)))
   const seen = new Uint8Array(collisionW * collisionH)
   const queue: number[] = []
   const enqueue = (cx: number, cy: number) => {
@@ -584,25 +714,43 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
     seen[i] = 1
     queue.push(i)
   }
-  // 起點可能在界外，clamp 後入列
-  enqueue(Math.max(0, Math.min(collisionW - 1, cx0)), Math.max(0, Math.min(collisionH - 1, cy0)))
+  enqueue(cx0, cy0)
+  // BFS 以「曼哈頓層數」推進；找到第一個合法點後，再多掃 2 層以涵蓋對角更近者，然後停。
+  let foundAtSteps = -1
+  let steps = 0
+  // 用 (idx<<16 | step) 太脆弱，改用平行陣列存步數
+  const stepOf = new Map<number, number>()
+  stepOf.set(cy0 * collisionW + cx0, 0)
   while (queue.length > 0) {
     const idx = queue.shift()!
     const cx = idx % collisionW
     const cy = Math.floor(idx / collisionW)
-    if (collisionMask[idx] === 1) {
-      // 候選：cell 中心，轉回原始像素座標後用統一碰撞標準驗證
-      const candPx = (cx + 0.5) / pxToColl
-      const candPy = (cy + 0.5) / pxToColl
-      if (isPassableAtPixel(candPx, candPy)) {
-        return { x: candPx, y: candPy }
-      }
+    steps = stepOf.get(idx) ?? 0
+    if (foundAtSteps >= 0 && steps > foundAtSteps + 2) break // 已找到合法點且多掃 2 層 → 收斂
+    consider(cx, cy)
+    if (bestValid && foundAtSteps < 0) foundAtSteps = steps
+    for (const [nx, ny] of [
+      [cx + 1, cy],
+      [cx - 1, cy],
+      [cx, cy + 1],
+      [cx, cy - 1],
+    ] as const) {
+      if (nx < 0 || nx >= collisionW || ny < 0 || ny >= collisionH) continue
+      const ni = ny * collisionW + nx
+      if (seen[ni]) continue
+      stepOf.set(ni, steps + 1)
+      enqueue(nx, ny)
     }
-    enqueue(cx + 1, cy)
-    enqueue(cx - 1, cy)
-    enqueue(cx, cy + 1)
-    enqueue(cx, cy - 1)
   }
+
+  if (bestValid) return bestValid
+  if (bestInside) {
+    console.warn(
+      '[SceneView] snapToNearestPassable: 找不到「圓可完整塞入」的點（走道可能比玩家直徑窄），退回最近可走 cell 中心。',
+    )
+    return bestInside
+  }
+  console.warn('[SceneView] snapToNearestPassable: 完全找不到可走 cell（smoothedMask 全牆？），回傳原點。')
   return { x: px, y: py }
 }
 
@@ -664,16 +812,33 @@ function tryMove(dtSec: number) {
   if (!mapStore.userPosition) return
   const heading = mapStore.userHeading ?? 0
 
+  // 轉視角：只有鍵盤 rot 走這裡（觸控轉視角在 onLookMove 直接累加 userHeading）。
   if (moveInput.rot !== 0) {
     mapStore.userHeading = heading + moveInput.rot * ROT_SPEED * dtSec
   }
 
-  if (moveInput.fwd !== 0) {
+  // 移動向量（strafe 模型，相對目前視角）：
+  //   fwd    沿「前方向」=(cos h, sin h)
+  //   strafe 沿「右方向」=(cos(h+π/2), sin(h+π/2)) = (-sin h, cos h)
+  //   世界移動方向 = fwd × 前方向 + strafe × 右方向
+  // 兩軸合成後再夾住長度 ≤ 1（避免斜推時 fwd² + strafe² > 1 造成對角線比直線快）。
+  let fwd = moveInput.fwd
+  let strafe = moveInput.strafe
+  const inputMag = Math.hypot(fwd, strafe)
+  if (inputMag > 1) {
+    fwd /= inputMag
+    strafe /= inputMag
+  }
+  if (fwd !== 0 || strafe !== 0) {
     const h = mapStore.userHeading ?? 0
-    const totalStepPx = moveInput.fwd * MOVE_SPEED_PX * dtSec
-    const dirX = Math.cos(h)
-    const dirY = Math.sin(h)
-    // 全部換算到 ds-cell 座標系，子步長 0.3 cell（防穿牆 tunneling 門檻）
+    const cosH = Math.cos(h)
+    const sinH = Math.sin(h)
+    // 前方向 (cosH, sinH)、右方向 (-sinH, cosH)
+    const dirX = fwd * cosH + strafe * -sinH
+    const dirY = fwd * sinH + strafe * cosH
+    const totalStepPx = MOVE_SPEED_PX * dtSec
+    // 全部換算到 ds-cell 座標系，子步長 0.3 cell（防穿牆 tunneling 門檻）。
+    // moveCirclePoly/moveCircle 已接受任意 (du,dv)，斜向移動不需改碰撞，沿牆滑行照舊。
     const cu = mapStore.userPosition.x * pxToColl
     const cv = mapStore.userPosition.y * pxToColl
     const duTotal = dirX * totalStepPx * pxToColl
@@ -688,6 +853,12 @@ function tryMove(dtSec: number) {
       const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
       mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
     }
+  }
+
+  // debug 疊層讀值（heading 正規化到 [-π,π] 方便閱讀）。
+  if (showDebug.value) {
+    const hh = mapStore.userHeading ?? 0
+    debugHeading.value = Math.atan2(Math.sin(hh), Math.cos(hh))
   }
 }
 
@@ -737,6 +908,7 @@ function animate(ts?: number) {
 
   if (viewMode.value === 'first-person') {
     ensureUserState()
+    syncMoveInput() // 合併鍵盤 + 搖桿成 moveInput（每幀，tryMove 前）
     tryMove(dt)
     updateOffPath()
   } else {
@@ -751,6 +923,23 @@ function animate(ts?: number) {
 function enterFirstPerson() {
   viewMode.value = 'first-person'
   ensureUserState()
+  // === Bug1 診斷：起點 / 起點是否可走 / snap 結果 / snap 結果是否可走 ===
+  // 用來判別問題是「起點被判不可走」還是「snap 找錯點」。實測排查後可移除。
+  if (mapStore.startPoint) {
+    const sp = mapStore.startPoint
+    const startOk = isPassableAtPixel(sp.x, sp.y)
+    const startInside = isInsideWalkable(sp.x, sp.y)
+    const snapped = snapToNearestPassable(sp.x, sp.y)
+    const snapOk = isPassableAtPixel(snapped.x, snapped.y)
+    const snapInside = isInsideWalkable(snapped.x, snapped.y)
+    console.log(
+      '[SceneView][enterFP] startPoint=(%d,%d) passable=%s inside=%s | snap=(%.1f,%.1f) passable=%s inside=%s | userPos=(%.1f,%.1f) | mode=%s',
+      sp.x, sp.y, String(startOk), String(startInside),
+      snapped.x, snapped.y, String(snapOk), String(snapInside),
+      mapStore.userPosition?.x ?? NaN, mapStore.userPosition?.y ?? NaN,
+      collisionSegs ? 'poly' : 'grid',
+    )
+  }
   mapGroup.rotation.y = 0
   pathGroup.rotation.y = 0
   // 第一人稱由 updateCamera 直接控制相機，停用 OrbitControls 以免互搶。
@@ -759,6 +948,13 @@ function enterFirstPerson() {
 
 function exitFirstPerson() {
   viewMode.value = 'overview'
+  // 離開第一人稱：清掉鍵盤/搖桿/轉視角殘留輸入，避免回俯瞰後還在動或下次進來漂移。
+  keyInput.fwd = 0
+  keyInput.rot = 0
+  moveInput.fwd = 0
+  moveInput.strafe = 0
+  moveInput.rot = 0
+  clearTouchState()
   if (camera) {
     camera.position.set(0, MAP_EXTENT * 0.9, MAP_EXTENT * 1.1)
     camera.lookAt(0, 0, 0)
@@ -771,6 +967,21 @@ function exitFirstPerson() {
   }
 }
 
+// 把鍵盤(keyInput)與搖桿(joystick)合併成本幀的 moveInput。每幀呼叫一次（tryMove 前）。
+//   fwd/strafe：取「絕對值較大」的來源 —— 搖桿推到底(±1)等同鍵盤，搖桿類比小量也能生效，
+//               鍵盤按住時不會被靜止搖桿(0)歸零。strafe 只有搖桿會出（鍵盤不側移）。
+//   rot       ：只有鍵盤（A/D/←/→ 轉視角）；觸控轉視角直接改 userHeading，不經此。
+function syncMoveInput() {
+  const jx = Math.abs(joystick.jx) >= JOYSTICK_DEADZONE ? joystick.jx : 0
+  const jy = Math.abs(joystick.jy) >= JOYSTICK_DEADZONE ? joystick.jy : 0
+  // jy 已在 updateJoystickFromPointer 取負，故「上=前進(+)」可直接當 fwd；jx「右=側移(+)」當 strafe。
+  const joyFwd = jy
+  const joyStrafe = jx
+  moveInput.fwd = Math.abs(joyFwd) >= Math.abs(keyInput.fwd) ? joyFwd : keyInput.fwd
+  moveInput.strafe = joyStrafe
+  moveInput.rot = keyInput.rot
+}
+
 function onKey(down: boolean, e: KeyboardEvent) {
   if (viewMode.value !== 'first-person') return
   const v = down ? 1 : 0
@@ -778,22 +989,22 @@ function onKey(down: boolean, e: KeyboardEvent) {
     case 'w':
     case 'W':
     case 'ArrowUp':
-      moveInput.fwd = v
+      keyInput.fwd = v
       break
     case 's':
     case 'S':
     case 'ArrowDown':
-      moveInput.fwd = -v
+      keyInput.fwd = -v
       break
     case 'a':
     case 'A':
     case 'ArrowLeft':
-      moveInput.rot = -v
+      keyInput.rot = -v // 桌機沿用習慣：A/← = 左轉視角（非側移）
       break
     case 'd':
     case 'D':
     case 'ArrowRight':
-      moveInput.rot = v
+      keyInput.rot = v // D/→ = 右轉視角
       break
     default:
       return
@@ -803,17 +1014,117 @@ function onKey(down: boolean, e: KeyboardEvent) {
 const onKeyDown = (e: KeyboardEvent) => onKey(true, e)
 const onKeyUp = (e: KeyboardEvent) => onKey(false, e)
 
-function holdFwd(v: number) {
-  moveInput.fwd = v
+// ============================================================================
+// 觸控操控（第一人稱）：虛擬搖桿 + 滑屏轉視角，多點觸控分流
+// ============================================================================
+//
+// 【pointerId 分流】所有觸控事件掛在覆蓋全螢幕的 .touch-layer 上，pointerdown 依「落點」
+//   決定這根手指是「搖桿」還是「轉視角」，並把它的 pointerId 記到 joystickPointerId 或
+//   lookPointerId。之後 pointermove / pointerup 一律先比對 e.pointerId，只處理屬於自己
+//   角色的那根手指 → 左手搖桿與右手滑屏可同時、互不干擾。絕不用單一全域 pointer 狀態。
+//
+// 【區域劃分（浮動式）】落點在「畫面左半」→ 搖桿（底座浮動生成在手指按下處）；
+//   落點在「畫面右半」→ 轉視角。手指一旦歸搖桿，後續滑到右半也仍算搖桿（用 pointerId 鎖定），
+//   不會半途變成轉視角；反之亦然。
+//
+// 【搖桿向量】updateJoystickFromPointer 以「按下處（=底座中心）」為原點算 (dx,dy) 像素位移，
+//   除以 JOYSTICK_KNOB_RANGE 正規化，長度 >1 夾回 1。jx=右(+)/左(-)；螢幕 y 往下為正，
+//   前進要正，故 jy = -dy/range（手指往上 → dy<0 → jy>0 → 前進）。死區在 syncMoveInput 套用。
+//
+// 【轉視角】onLookMove 取本次 clientX - 上次 clientX 的水平 delta × LOOK_SENSITIVITY，
+//   累加到 userHeading。垂直方向忽略（目前只做 yaw，相機維持平視）。
+
+// 落點是否在「搖桿可用半邊」（畫面左半）。改用半邊判定取代固定底座圓 → 浮動搖桿可在左半任意處生成。
+function isInJoystickZone(clientX: number): boolean {
+  return clientX <= window.innerWidth / 2
 }
-function holdRot(v: number) {
-  moveInput.rot = v
+
+function updateJoystickFromPointer(clientX: number, clientY: number) {
+  let dx = clientX - joystickCenterX
+  let dy = clientY - joystickCenterY
+  const len = Math.hypot(dx, dy)
+  // 夾住在搖桿頭可移動範圍內（單位圓 = JOYSTICK_KNOB_RANGE 像素）。
+  if (len > JOYSTICK_KNOB_RANGE) {
+    dx = (dx / len) * JOYSTICK_KNOB_RANGE
+    dy = (dy / len) * JOYSTICK_KNOB_RANGE
+  }
+  joystick.knobX = dx
+  joystick.knobY = dy
+  joystick.jx = dx / JOYSTICK_KNOB_RANGE // 右(+)/左(-)
+  joystick.jy = -dy / JOYSTICK_KNOB_RANGE // 上(+,前進)/下(-,後退)
 }
-function releaseFwd() {
-  moveInput.fwd = 0
+
+function resetJoystick() {
+  joystick.jx = 0
+  joystick.jy = 0
+  joystick.knobX = 0
+  joystick.knobY = 0
+  joystick.active = false
+  joystickPointerId = null
 }
-function releaseRot() {
-  moveInput.rot = 0
+
+// 觸控事件是否落在 UI 控制項（按鈕/連結）上。雖然這些 UI 的 z-index 已高於 touch-layer
+// → 正常情況 pointerdown 會直接命中按鈕、不會進到這裡；但為防呆（瀏覽器差異 / 事件冒泡），
+// 仍在此判斷 e.target 是否在互動控制項內，是的話讓事件穿透（不轉成搖桿/轉視角）。
+function isUiControlTarget(e: PointerEvent): boolean {
+  const t = e.target as HTMLElement | null
+  if (!t || typeof t.closest !== 'function') return false
+  return !!t.closest('button, a, .scene-flow-btn, .mode-btn, .replan-btn')
+}
+
+function onTouchPointerDown(e: PointerEvent) {
+  if (viewMode.value !== 'first-person') return
+  // 落在 UI 按鈕上 → 不處理，讓點擊穿透到按鈕（俯瞰切換/流程/重新規劃皆可點）。
+  if (isUiControlTarget(e)) return
+  // 搖桿落點（浮動式）：手指落在「畫面左半」且搖桿尚未被別的手指佔用 → 歸搖桿，
+  // 底座中心 = 手指按下處（不是固定 DOM 中心），knob 從該點起算 → 手指永遠在搖桿中心附近、不會滑出。
+  if (joystickPointerId === null && isInJoystickZone(e.clientX)) {
+    joystickCenterX = e.clientX
+    joystickCenterY = e.clientY
+    joystick.baseX = e.clientX // 給 template 把底座浮動定位到手指處
+    joystick.baseY = e.clientY
+    joystickPointerId = e.pointerId
+    joystick.active = true
+    updateJoystickFromPointer(e.clientX, e.clientY)
+    e.preventDefault()
+    return
+  }
+  // 右半（或左半已被佔用）→ 轉視角：若轉視角尚未被佔用 → 歸轉視角。
+  if (lookPointerId === null) {
+    lookPointerId = e.pointerId
+    lookLastX = e.clientX
+    e.preventDefault()
+  }
+}
+
+function onTouchPointerMove(e: PointerEvent) {
+  if (viewMode.value !== 'first-person') return
+  if (e.pointerId === joystickPointerId) {
+    updateJoystickFromPointer(e.clientX, e.clientY)
+    e.preventDefault()
+  } else if (e.pointerId === lookPointerId) {
+    const dx = e.clientX - lookLastX
+    lookLastX = e.clientX
+    const h = mapStore.userHeading ?? 0
+    mapStore.userHeading = h + dx * LOOK_SENSITIVITY
+    e.preventDefault()
+  }
+}
+
+function onTouchPointerUp(e: PointerEvent) {
+  if (e.pointerId === joystickPointerId) {
+    resetJoystick() // 放開回中，不漂移
+    e.preventDefault()
+  } else if (e.pointerId === lookPointerId) {
+    lookPointerId = null
+    e.preventDefault()
+  }
+}
+
+// 把目前已分流的手指狀態全部歸零（退出第一人稱 / 卸載時呼叫，避免殘留輸入）。
+function clearTouchState() {
+  resetJoystick()
+  lookPointerId = null
 }
 
 function resize() {
@@ -897,6 +1208,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  clearTouchState()
   controls?.dispose()
   disposeGroup(mapGroup)
   disposeGroup(pathGroup)
@@ -940,45 +1252,41 @@ onBeforeUnmount(() => {
       <button class="replan-btn" @click="replanFromCurrent">重新規劃</button>
     </div>
 
-    <!-- 手機觸控方向盤，輸入值會在 animation loop 轉成前進與旋轉速度。 -->
-    <div v-if="viewMode === 'first-person' && hasMask" class="controls">
-      <div class="pad">
-        <button
-          class="pad-btn up"
-          @pointerdown.prevent="holdFwd(1)"
-          @pointerup="releaseFwd"
-          @pointerleave="releaseFwd"
-          @pointercancel="releaseFwd"
-        >
-          前進
-        </button>
-        <button
-          class="pad-btn left"
-          @pointerdown.prevent="holdRot(-1)"
-          @pointerup="releaseRot"
-          @pointerleave="releaseRot"
-          @pointercancel="releaseRot"
-        >
-          左轉
-        </button>
-        <button
-          class="pad-btn right"
-          @pointerdown.prevent="holdRot(1)"
-          @pointerup="releaseRot"
-          @pointerleave="releaseRot"
-          @pointercancel="releaseRot"
-        >
-          右轉
-        </button>
-        <button
-          class="pad-btn down"
-          @pointerdown.prevent="holdFwd(-1)"
-          @pointerup="releaseFwd"
-          @pointerleave="releaseFwd"
-          @pointercancel="releaseFwd"
-        >
-          後退
-        </button>
+    <!--
+      第一人稱觸控層：覆蓋全螢幕，承接所有 pointer 事件並依落點分流（搖桿 / 轉視角）。
+      只在 first-person 模式渲染 → 俯瞰模式時此層不存在，OrbitControls 直接吃 canvas 事件，不受影響。
+      touch-action:none（見 style）防瀏覽器手勢；事件掛同一層且用 pointerId 過濾。
+      區域劃分（浮動搖桿）：畫面左半 pointerdown 歸搖桿（底座浮動生成在手指處），右半歸轉視角。
+    -->
+    <div
+      v-if="viewMode === 'first-person' && hasMask"
+      class="touch-layer"
+      @pointerdown="onTouchPointerDown"
+      @pointermove="onTouchPointerMove"
+      @pointerup="onTouchPointerUp"
+      @pointercancel="onTouchPointerUp"
+      @pointerleave="onTouchPointerUp"
+    >
+      <!--
+        浮動虛擬搖桿：底座 + 可拖曳搖桿頭（knob 用 transform 跟手）。pointer 事件由外層 touch-layer 統一處理。
+        active 時 → 用 inline left/top 把底座中心定位到手指按下處（fixed 定位，translate(-50%,-50%) 置中）；
+        idle（未按）→ 移除 inline 定位，改吃 CSS 預設位置（水平置中、垂直約 62%）並半透明淡隱。
+      -->
+      <div
+        class="joystick-base"
+        :class="{ active: joystick.active }"
+        :style="joystick.active ? { left: `${joystick.baseX}px`, top: `${joystick.baseY}px` } : undefined"
+      >
+        <div
+          class="joystick-knob"
+          :style="{ transform: `translate(-50%, -50%) translate(${joystick.knobX}px, ${joystick.knobY}px)` }"
+        />
+      </div>
+
+      <!-- debug：顯示搖桿 (jx,jy) 與目前視角 heading（度），確認移動與轉視角各自獨立。 -->
+      <div v-if="showDebug" class="touch-debug">
+        jx {{ joystick.jx.toFixed(2) }} · jy {{ joystick.jy.toFixed(2) }}<br />
+        heading {{ debugHeadingDeg }}°
       </div>
     </div>
   </div>
@@ -1019,7 +1327,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 16px;
   right: 16px;
-  z-index: 2;
+  z-index: 5; /* 高於 .touch-layer(3)：第一人稱時流程按鈕仍可點 */
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
@@ -1056,6 +1364,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 16px;
   left: 16px;
+  z-index: 5; /* 高於 .touch-layer(3)：第一人稱時「俯瞰」切換鈕仍可點 */
   display: flex;
   gap: 8px;
 }
@@ -1079,6 +1388,7 @@ onBeforeUnmount(() => {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 5; /* 高於 .touch-layer(3)：偏離路徑的「重新規劃」鈕仍可點 */
   padding: var(--space-3) var(--space-4);
   background: var(--color-scene-warning);
   color: var(--color-white);
@@ -1098,46 +1408,68 @@ onBeforeUnmount(() => {
   font-weight: var(--font-bold);
 }
 
-.controls {
+/* 觸控層：覆蓋整個場景、承接所有 pointer 事件。touch-action:none 禁用瀏覽器手勢
+   （捲動/縮放/雙擊放大），確保搖桿拖曳與滑屏轉視角不被攔截。user-select:none 防選字。 */
+.touch-layer {
   position: absolute;
-  bottom: 20px;
-  right: 20px;
+  inset: 0;
+  z-index: 3;
+  touch-action: none;
   user-select: none;
+  -webkit-user-select: none;
 }
-.pad {
-  display: grid;
-  grid-template-columns: repeat(3, 64px);
-  grid-template-rows: repeat(3, 64px);
-  gap: 6px;
+
+/* 浮動虛擬搖桿底座。尺寸 = JOYSTICK_BASE_RADIUS×2（120px），須與 script 常數一致。
+   position:fixed + translate(-50%,-50%)：以「中心」對齊定位點（idle=CSS 預設、active=inline 手指座標）。
+   用 fixed（視口座標）讓 active 時的 inline left/top（= pointer clientX/Y，視口座標）精準跟手。
+   idle（未按）：水平置中、垂直約 62%（中下、比正中略高），半透明淡隱、不擋視線、提示搖桿在左半可用。 */
+.joystick-base {
+  position: fixed;
+  left: 50%;
+  top: 72%;
+  width: 120px;
+  height: 120px;
+  border-radius: var(--radius-circle);
+  background: var(--color-scene-panel);
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  opacity: 0.35; /* idle：淡 */
+  transition: opacity 0.15s ease;
 }
-.pad-btn {
-  border: none;
-  border-radius: var(--radius-md);
+/* active：浮動到手指處（inline left/top 覆蓋上面的預設值），加深、邊框點亮。 */
+.joystick-base.active {
+  opacity: 0.85;
+  border-color: var(--color-scene-accent);
+}
+
+/* 搖桿頭：底座中心起算，knobX/knobY（px）跟手。範圍夾在 JOYSTICK_KNOB_RANGE（44px）內。 */
+.joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-circle);
+  background: var(--color-scene-accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none; /* 事件由 touch-layer 統一處理，knob 不自己吃 pointer */
+}
+
+/* debug 疊層：右下角顯示搖桿值與 heading，純資訊不吃事件。 */
+.touch-debug {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--color-scene-panel);
   color: var(--color-scene-text);
-  font-size: var(--text-base);
-  cursor: pointer;
-  touch-action: none;
-}
-.pad-btn:active {
-  background: var(--color-scene-accent);
-  color: var(--color-text);
-}
-.pad-btn.up {
-  grid-column: 2;
-  grid-row: 1;
-}
-.pad-btn.left {
-  grid-column: 1;
-  grid-row: 2;
-}
-.pad-btn.right {
-  grid-column: 3;
-  grid-row: 2;
-}
-.pad-btn.down {
-  grid-column: 2;
-  grid-row: 3;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 @media (max-width: 720px) {
@@ -1186,21 +1518,6 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
     text-align: center;
   }
-
-  .controls {
-    right: var(--space-3);
-    bottom: var(--space-3);
-  }
-
-  .pad {
-    grid-template-columns: repeat(3, 56px);
-    grid-template-rows: repeat(3, 56px);
-    gap: var(--space-1);
-  }
-
-  .pad-btn {
-    font-size: var(--text-sm);
-  }
 }
 
 @media (max-width: 480px) {
@@ -1243,13 +1560,6 @@ onBeforeUnmount(() => {
   .offpath-banner {
     top: 150px;
   }
-
-  .controls {
-    left: 50%;
-    right: auto;
-    bottom: 110px;
-    transform: translateX(-50%);
-  }
 }
 
 @media (max-height: 620px) and (orientation: landscape) {
@@ -1262,13 +1572,21 @@ onBeforeUnmount(() => {
     left: auto;
   }
 
-  .pad {
-    grid-template-columns: repeat(3, 48px);
-    grid-template-rows: repeat(3, 48px);
+  /* 橫向矮螢幕：idle 搖桿略上移，避開底部、不擋畫面（active 仍跟手不受影響）。 */
+  .joystick-base {
+    top: 66%;
   }
 
   .offpath-banner {
     top: var(--space-3);
+  }
+}
+
+/* 桌機/寬螢幕（非手機）：畫面較高，idle 搖桿再往下一點，更貼近底部、不擋視線。
+   active 跟手不受影響（inline 座標）。 */
+@media (min-width: 721px) {
+  .joystick-base {
+    top: 82%;
   }
 }
 </style>
