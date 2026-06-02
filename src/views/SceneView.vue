@@ -1087,6 +1087,11 @@ function onTouchPointerDown(e: PointerEvent) {
   // 搖桿落點（浮動式）：手指落在「畫面下方搖桿區」且搖桿尚未被別的手指佔用 → 歸搖桿，
   // 底座中心 = 手指按下處（不是固定 DOM 中心），knob 從該點起算 → 手指永遠在搖桿中心附近、不會滑出。
   const layer = e.currentTarget as HTMLElement // = .touch-layer，用來算下方比例
+  // setPointerCapture：把這根 pointer 綁定到 touch-layer，之後 pointermove/up 即使手指滑出
+  // canvas 邊界（甚至滑出視窗）仍持續送到此元素 → 不會「滑出去就失去操控/卡住不歸零」。
+  const capture = () => {
+    try { layer.setPointerCapture(e.pointerId) } catch { /* 某些環境不支援，忽略 */ }
+  }
   if (joystickPointerId === null && isInJoystickZone(e.clientY, layer)) {
     joystickCenterX = e.clientX
     joystickCenterY = e.clientY
@@ -1094,6 +1099,7 @@ function onTouchPointerDown(e: PointerEvent) {
     joystick.baseY = e.clientY
     joystickPointerId = e.pointerId
     joystick.active = true
+    capture()
     updateJoystickFromPointer(e.clientX, e.clientY)
     e.preventDefault()
     return
@@ -1102,6 +1108,7 @@ function onTouchPointerDown(e: PointerEvent) {
   if (lookPointerId === null) {
     lookPointerId = e.pointerId
     lookLastX = e.clientX
+    capture()
     e.preventDefault()
   }
 }
@@ -1274,7 +1281,6 @@ onBeforeUnmount(() => {
       @pointermove="onTouchPointerMove"
       @pointerup="onTouchPointerUp"
       @pointercancel="onTouchPointerUp"
-      @pointerleave="onTouchPointerUp"
     >
       <!--
         浮動虛擬搖桿：底座 + 可拖曳搖桿頭（knob 用 transform 跟手）。pointer 事件由外層 touch-layer 統一處理。
