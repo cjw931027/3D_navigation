@@ -63,6 +63,9 @@ const ROT_SPEED = Math.PI * 0.9
 const LOOK_SENSITIVITY = 0.005
 // 搖桿死區：正規化半徑 < 此值時視為回中（0），避免手指輕觸造成漂移。
 const JOYSTICK_DEADZONE = 0.15
+// 觸控分區：畫面「下方」此比例為搖桿生效區，其餘上方為轉視角區（上下分區，不綁左右手）。
+// 0.30 = 下方 30%。比例相對 touch-layer（場景區）高度，非整個視窗。調大 = 搖桿區更寬。
+const JOYSTICK_ZONE_RATIO = 0.30
 
 // === 虛擬搖桿狀態（浮動式：按下即在手指處生成）===
 // jx/jy ∈ [-1,1]：以底座中心為原點、正規化到單位圓的搖桿頭偏移（已夾住、未套死區）。
@@ -1021,10 +1024,10 @@ const onKeyUp = (e: KeyboardEvent) => onKey(false, e)
 // 【pointerId 分流】所有觸控事件掛在覆蓋全螢幕的 .touch-layer 上，pointerdown 依「落點」
 //   決定這根手指是「搖桿」還是「轉視角」，並把它的 pointerId 記到 joystickPointerId 或
 //   lookPointerId。之後 pointermove / pointerup 一律先比對 e.pointerId，只處理屬於自己
-//   角色的那根手指 → 左手搖桿與右手滑屏可同時、互不干擾。絕不用單一全域 pointer 狀態。
+//   角色的那根手指 → 搖桿與轉視角可同時、互不干擾（不綁左右手）。絕不用單一全域 pointer 狀態。
 //
-// 【區域劃分（浮動式）】落點在「畫面左半」→ 搖桿（底座浮動生成在手指按下處）；
-//   落點在「畫面右半」→ 轉視角。手指一旦歸搖桿，後續滑到右半也仍算搖桿（用 pointerId 鎖定），
+// 【區域劃分（浮動式）】落點在「畫面下方 JOYSTICK_ZONE_RATIO 比例」→ 搖桿（底座浮動生成在手指按下處）；
+//   落點在「上方其餘」→ 轉視角。手指一旦歸搖桿，後續滑到上方也仍算搖桿（用 pointerId 鎖定），
 //   不會半途變成轉視角；反之亦然。
 //
 // 【搖桿向量】updateJoystickFromPointer 以「按下處（=底座中心）」為原點算 (dx,dy) 像素位移，
@@ -1034,9 +1037,14 @@ const onKeyUp = (e: KeyboardEvent) => onKey(false, e)
 // 【轉視角】onLookMove 取本次 clientX - 上次 clientX 的水平 delta × LOOK_SENSITIVITY，
 //   累加到 userHeading。垂直方向忽略（目前只做 yaw，相機維持平視）。
 
-// 落點是否在「搖桿可用半邊」（畫面左半）。改用半邊判定取代固定底座圓 → 浮動搖桿可在左半任意處生成。
-function isInJoystickZone(clientX: number): boolean {
-  return clientX <= window.innerWidth / 2
+// 落點是否在「搖桿生效區」（touch-layer 下方 JOYSTICK_ZONE_RATIO 比例）。
+// 用 touch-layer 自身的 rect（非 window.innerHeight）算相對位置，因為場景上方有 header/步驟條，
+// 用視窗高度會對不準。relativeY=0 為頂、1 為底；落在底部 ratio 帶內 → 搖桿區。
+function isInJoystickZone(clientY: number, layer: HTMLElement): boolean {
+  const rect = layer.getBoundingClientRect()
+  if (rect.height <= 0) return false
+  const relativeY = (clientY - rect.top) / rect.height
+  return relativeY >= 1 - JOYSTICK_ZONE_RATIO
 }
 
 function updateJoystickFromPointer(clientX: number, clientY: number) {
@@ -1076,23 +1084,31 @@ function onTouchPointerDown(e: PointerEvent) {
   if (viewMode.value !== 'first-person') return
   // 落在 UI 按鈕上 → 不處理，讓點擊穿透到按鈕（俯瞰切換/流程/重新規劃皆可點）。
   if (isUiControlTarget(e)) return
-  // 搖桿落點（浮動式）：手指落在「畫面左半」且搖桿尚未被別的手指佔用 → 歸搖桿，
+  // 搖桿落點（浮動式）：手指落在「畫面下方搖桿區」且搖桿尚未被別的手指佔用 → 歸搖桿，
   // 底座中心 = 手指按下處（不是固定 DOM 中心），knob 從該點起算 → 手指永遠在搖桿中心附近、不會滑出。
-  if (joystickPointerId === null && isInJoystickZone(e.clientX)) {
+  const layer = e.currentTarget as HTMLElement // = .touch-layer，用來算下方比例
+  // setPointerCapture：把這根 pointer 綁定到 touch-layer，之後 pointermove/up 即使手指滑出
+  // canvas 邊界（甚至滑出視窗）仍持續送到此元素 → 不會「滑出去就失去操控/卡住不歸零」。
+  const capture = () => {
+    try { layer.setPointerCapture(e.pointerId) } catch { /* 某些環境不支援，忽略 */ }
+  }
+  if (joystickPointerId === null && isInJoystickZone(e.clientY, layer)) {
     joystickCenterX = e.clientX
     joystickCenterY = e.clientY
     joystick.baseX = e.clientX // 給 template 把底座浮動定位到手指處
     joystick.baseY = e.clientY
     joystickPointerId = e.pointerId
     joystick.active = true
+    capture()
     updateJoystickFromPointer(e.clientX, e.clientY)
     e.preventDefault()
     return
   }
-  // 右半（或左半已被佔用）→ 轉視角：若轉視角尚未被佔用 → 歸轉視角。
+  // 上方（或搖桿區已被佔用）→ 轉視角：若轉視角尚未被佔用 → 歸轉視角。
   if (lookPointerId === null) {
     lookPointerId = e.pointerId
     lookLastX = e.clientX
+    capture()
     e.preventDefault()
   }
 }
@@ -1256,7 +1272,7 @@ onBeforeUnmount(() => {
       第一人稱觸控層：覆蓋全螢幕，承接所有 pointer 事件並依落點分流（搖桿 / 轉視角）。
       只在 first-person 模式渲染 → 俯瞰模式時此層不存在，OrbitControls 直接吃 canvas 事件，不受影響。
       touch-action:none（見 style）防瀏覽器手勢；事件掛同一層且用 pointerId 過濾。
-      區域劃分（浮動搖桿）：畫面左半 pointerdown 歸搖桿（底座浮動生成在手指處），右半歸轉視角。
+      區域劃分（浮動搖桿）：畫面下方比例 pointerdown 歸搖桿（底座浮動生成在手指處），上方歸轉視角。
     -->
     <div
       v-if="viewMode === 'first-person' && hasMask"
@@ -1265,7 +1281,6 @@ onBeforeUnmount(() => {
       @pointermove="onTouchPointerMove"
       @pointerup="onTouchPointerUp"
       @pointercancel="onTouchPointerUp"
-      @pointerleave="onTouchPointerUp"
     >
       <!--
         浮動虛擬搖桿：底座 + 可拖曳搖桿頭（knob 用 transform 跟手）。pointer 事件由外層 touch-layer 統一處理。
