@@ -20,8 +20,17 @@ static int                   g_maskHeight = 0;
 // 路徑以 x0,y0,x1,y1,... 交錯存放，JS 以 Int32Array 讀取。
 static std::vector<int32_t>  g_pathBuffer;
 
-// 邊緣平滑 opening 的 kernel 大小，預設 3；測試 harness 可改為 0 關閉以做 before/after 對比。
-static int gEdgeSmoothKernelSize = 3;
+// 邊緣平滑 opening（erode→帶屏障 dilate）的 kernel 大小。預設 0 = 關閉。
+//
+// 為何關閉：此 opening 原為「3D 牆面斜邊鋸齒」而加（見 645bfce），但當時 3D 還用 greedy
+// meshing 直接吃原始 mask，需要先把 mask 磨平。現在 3D 改由 SceneView 的輪廓抽取 +
+// Douglas-Peucker 簡化（脫離網格）處理鋸齒，這層 mask 平滑對 3D 已多餘，只剩美化 2D 預覽。
+//
+// 而它有嚴重副作用：erode 會把「1~2px 寬的窄通道」整條吃掉，後續帶屏障 dilate 又因兩側是
+// 牆（wallMask 屏障）而回填不過去 → 窄通道（窄門、柵欄開口）被永久侵蝕、A* 繞路、3D 變牆。
+// 代價（吃窄通道）遠大於好處（只剩美化 2D 預覽），故預設關閉。
+// 保留函式與此變數：將來若 2D 預覽鋸齒需處理，改回 >1（奇數）即可重新啟用。
+static int gEdgeSmoothKernelSize = 0;
 
 int allocateMemory(int size) {
     if (mapBuffer != nullptr) free(mapBuffer);
@@ -192,6 +201,22 @@ static constexpr int   WALL_DARK_CHROMA_MAX     = 30;   // 彩度上限：超過
 static constexpr int   LINE_MAX_MIN_SPAN        = 3;    // 直線碎片：短邊最多幾像素
 static constexpr int   LINE_MIN_MAX_SPAN        = 20;   // 直線碎片：長邊最少幾像素
 
+// === 淺灰「線狀」框線補抓 ===
+// 有些平面圖的最外圈邊界線畫得很淡（例如 hospital.jpg 外框 brightness≈213），
+// 超過 DARK_THRESHOLD(170) → 連 isDark 都進不了 → 四規則完全輪不到它判，
+// 結果整圈外框沒被當牆，A* 會把路徑導向院區外那一圈（實際無路可走）。
+//
+// 不能只調高 DARK_THRESHOLD：那會讓大片淡灰底色（如某些圖的房間填色）整片被誤收成牆。
+// 關鍵差異不在亮度而在「形狀」── 外框是細長連續的「線」，淡灰填色是「面」。
+//
+// 解法：對「淺灰候選層」(brightness ∈ [DARK_THRESHOLD, FAINT_DARK_THRESHOLD)、仍低彩度)
+// 獨立做 8 連通域，只有「細長線狀」(minSpan ≤ FAINT_LINE_MAX_MIN_SPAN AND
+// maxSpan ≥ FAINT_LINE_MIN_MAX_SPAN) 的連通域才併入 isDark；大色塊（面）被擋掉。
+// 併入後一切照舊跑主連通域 + A/B/C/D 規則（淡灰外框多以規則 A/D 命中）。
+static constexpr uint8_t FAINT_DARK_THRESHOLD   = 225;  // 淺灰層亮度上限（介於核心牆 170 與白底 ~254 之間）
+static constexpr int   FAINT_LINE_MAX_MIN_SPAN  = 4;    // 淺灰線狀：短邊最多幾像素（夠細才算線）
+static constexpr int   FAINT_LINE_MIN_MAX_SPAN  = 40;   // 淺灰線狀：長邊最少幾像素（夠長才算框線，非雜點）
+
 // 統計資訊，給 test harness 使用（emscripten 主流程不需要）
 struct WallComponentStat {
     int minX, minY, maxX, maxY;
@@ -226,12 +251,66 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
         if (brightness < (int)darkThreshold && chroma < WALL_DARK_CHROMA_MAX) isDark[i] = true;
     }
 
-    std::vector<bool> visited(total, false);
     const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy8[] = {-1, -1, -1,  0, 0,  1, 1, 1};
 
     std::vector<int> queue;
     queue.reserve(512);
+
+    // === 淺灰線狀框線補抓（見上方常數註解）===
+    // 對「淺灰候選層」獨立連通，只把細長線狀者併入 isDark（大色塊不收）。
+    // 淺灰層定義：darkThreshold ≤ brightness < FAINT_DARK_THRESHOLD，且仍低彩度。
+    {
+        std::vector<bool> isFaint(total, false);
+        for (int i = 0; i < total; i++) {
+            int r = buf[i*4], g = buf[i*4+1], b = buf[i*4+2];
+            int brightness = (r + g + b) / 3;
+            int chroma = std::max({r, g, b}) - std::min({r, g, b});
+            if (brightness >= (int)darkThreshold && brightness < (int)FAINT_DARK_THRESHOLD
+                && chroma < WALL_DARK_CHROMA_MAX) {
+                isFaint[i] = true;
+            }
+        }
+        std::vector<bool> faintVisited(total, false);
+        std::vector<int> fq;
+        fq.reserve(512);
+        for (int start = 0; start < total; start++) {
+            if (!isFaint[start] || faintVisited[start]) continue;
+            fq.clear();
+            fq.push_back(start);
+            faintVisited[start] = true;
+            int minX = start % width, maxX = minX;
+            int minY = start / width, maxY = minY;
+            int head = 0;
+            while (head < (int)fq.size()) {
+                int cur = fq[head++];
+                int cx = cur % width, cy = cur / width;
+                if (cx < minX) minX = cx;
+                if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy;
+                if (cy > maxY) maxY = cy;
+                for (int d = 0; d < 8; d++) {
+                    int nx = cx + dx8[d], ny = cy + dy8[d];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int ni = ny * width + nx;
+                    if (!faintVisited[ni] && isFaint[ni]) {
+                        faintVisited[ni] = true;
+                        fq.push_back(ni);
+                    }
+                }
+            }
+            int bboxW = maxX - minX + 1;
+            int bboxH = maxY - minY + 1;
+            int faintMaxSpan = std::max(bboxW, bboxH) - 1;
+            int faintMinSpan = std::min(bboxW, bboxH);
+            // 只有「細長線狀」的淺灰連通域才採納為牆候選（併入 isDark）；色塊（面）丟棄。
+            if (faintMinSpan <= FAINT_LINE_MAX_MIN_SPAN && faintMaxSpan >= FAINT_LINE_MIN_MAX_SPAN) {
+                for (int idx : fq) isDark[idx] = true;
+            }
+        }
+    }
+
+    std::vector<bool> visited(total, false);
 
     for (int start = 0; start < total; start++) {
         if (!isDark[start] || visited[start]) continue;
@@ -563,10 +642,9 @@ void intelligentFloodFill(int width, int height,
         mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
                                      closingKernelSize, wallThicken, wallMask);
 
-    // 邊緣平滑（opening: erode→dilate）：磨掉 RGB 容差篩出的 1~2 px 鋸齒，
-    // dilate 仍受 wallMask 屏障保護，不會把可走區擴到牆外。
-    // kSize 預設 3：足以削掉典型 JPG 壓縮 / 色彩漸變造成的階梯，又不至於吃掉窄門。
-    // 用 static 變數而非 constexpr，方便離線 test harness 暫時改成 0 比對開關效果。
+    // 邊緣平滑（opening: erode→帶屏障 dilate）。預設關閉（gEdgeSmoothKernelSize=0 → no-op）。
+    // 3D 鋸齒已改由 SceneView 輪廓簡化處理，此層對 3D 多餘；且 erode 會吃掉窄通道、屏障 dilate
+    // 又救不回，導致窄門/柵欄開口不可走。詳見 gEdgeSmoothKernelSize 宣告處的說明。
     openWithBarrier(mask, wallMask, width, height, gEdgeSmoothKernelSize);
 
     if (denoiseMinArea > 0) {
