@@ -49,31 +49,42 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-// 將 A* 輸出的 pathNodes 疊回預覽圖，外圈黑線用來讓黃色路徑在淺色地圖上仍可辨識。
+// 將 A* 輸出的 pathNodes 疊回預覽圖。
+// 路線用鮮紅 #FF3B30，與可走區的青藍 (0,200,255) 強對比；外加白色外框，在深淺背景上都醒目。
+// 畫在可走區「上方」（正常 source-over，不用 destination-over）→ 不被半透明青藍蓋住而暗淡。
+// 線寬隨 canvas 解析度自適應：canvas 內部解析度 = 圖原始尺寸（可能很大），但 CSS 縮放顯示，
+// 若用固定 px，大圖在畫面上會變極細。改用「長邊的比例」+ 下限，確保各種尺寸畫面上都一致夠粗。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
 
-  ctx.save()
-  ctx.globalCompositeOperation = 'destination-over'
-  ctx.beginPath()
-  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
-  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)'
-  ctx.lineWidth = 5
-  ctx.lineJoin = 'round'
-  ctx.lineCap = 'round'
-  ctx.stroke()
-  ctx.restore()
+  const base = Math.max(ctx.canvas.width, ctx.canvas.height)
+  const lineW = Math.max(3, base * 0.006) // 紅線寬：約長邊 0.6%，最少 3px
+  const outlineW = lineW + Math.max(2, base * 0.004) // 白外框比紅線再寬一圈
 
-  ctx.beginPath()
-  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
-  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
-  ctx.strokeStyle = '#FFD600'
-  ctx.lineWidth = 3
+  const trace = () => {
+    ctx.beginPath()
+    ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+    for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  }
+
+  ctx.save()
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
+
+  // 白色外框（先畫，較寬）
+  trace()
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)'
+  ctx.lineWidth = outlineW
   ctx.stroke()
+
+  // 鮮紅主線（後畫，較窄，疊在外框上）
+  trace()
+  ctx.strokeStyle = '#FF3B30'
+  ctx.lineWidth = lineW
+  ctx.stroke()
+
+  ctx.restore()
 }
 
 // 起點與終點只畫在畫面層，不回寫到 imageRawData，避免下一次辨識把標記當成路色。
