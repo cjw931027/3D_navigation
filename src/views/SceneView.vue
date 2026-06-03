@@ -58,6 +58,23 @@ const offPath = ref(false)
 const OFF_PATH_THRESHOLD_PX = 18
 const MOVE_SPEED_PX = 30
 const ROT_SPEED = Math.PI * 0.9
+
+// === 動態指引路徑 + minimap 參數 ===
+// 偏離超過門檻 → 自動從當前位置重跑 A*（取代手動按鈕）；節流避免每幀重算。
+const REPLAN_MIN_INTERVAL_SEC = 0.8
+let lastReplanTs = 0
+// 3D 路徑（trimmed）重建門檻：角色移動超過此 px 才重建 tube，避免逐幀重建過重。
+const PATH_REBUILD_MOVE_PX = 3
+let lastPathBuildPos: { x: number; y: number } | null = null
+// minimap：以角色為中心的局部視窗。
+const MINIMAP_SIZE = 160 // canvas 像素邊長（CSS 也同尺寸）
+const MINIMAP_RADIUS_PX = 130 // 視窗半徑（原始 px），決定看多大範圍
+const minimapCanvas = ref<HTMLCanvasElement | null>(null)
+let minimapBaseTmp: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null
+let minimapBaseDirty = true // floodFillResultData 變動時設 true，下次 drawMinimap 重建 offscreen 底圖
+// 路徑統一鮮紅。
+const PATH_COLOR_HEX = 0xff3b30
+const PATH_COLOR_CSS = '#FF3B30'
 // 觸控滑屏轉視角靈敏度：每 1 CSS px 的水平位移 → userHeading 增加多少弧度。
 // 調大 = 轉更快。0.005 rad/px ≈ 滑半個 360px 寬手機螢幕轉約 100°，手感適中。
 const LOOK_SENSITIVITY = 0.005
@@ -550,6 +567,50 @@ function buildGeometry() {
   )
 }
 
+// 動態指引路徑：找 userPosition 在 pathNodes 折線上的最近投影點，回傳「從腳下到終點」的節點序列
+//（原始 px 座標）。沿路走時前段被裁掉 → 路徑視覺上縮短。第一人稱外（無 userPosition）回傳完整 pathNodes。
+function computeTrimmedPath(): Array<{ x: number; y: number }> {
+  const nodes = mapStore.pathNodes as Array<{ x: number; y: number }>
+  if (!nodes || nodes.length < 2) return nodes ?? []
+  const u = mapStore.userPosition
+  if (!u || viewMode.value !== 'first-person') return nodes.slice()
+
+  // 找最近段 i 與其投影參數 t（0..1）
+  let bestSeg = 0
+  let bestT = 0
+  let bestD2 = Infinity
+  let bestProj = { x: nodes[0]!.x, y: nodes[0]!.y }
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const a = nodes[i]!
+    const b = nodes[i + 1]!
+    const abx = b.x - a.x
+    const aby = b.y - a.y
+    const ab2 = abx * abx + aby * aby
+    let t = ab2 === 0 ? 0 : ((u.x - a.x) * abx + (u.y - a.y) * aby) / ab2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const px = a.x + t * abx
+    const py = a.y + t * aby
+    const dx = u.x - px
+    const dy = u.y - py
+    const d2 = dx * dx + dy * dy
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestSeg = i
+      bestT = t
+      bestProj = { x: px, y: py }
+    }
+  }
+  // trimmed = [投影點, 投影所在段之後的所有節點...]
+  const out: Array<{ x: number; y: number }> = [bestProj]
+  const startIdx = bestT >= 1 ? bestSeg + 2 : bestSeg + 1
+  for (let i = startIdx; i < nodes.length; i++) out.push(nodes[i]!)
+  if (out.length < 2) out.push(nodes[nodes.length - 1]!)
+  return out
+}
+
+// 依「目前動態(trimmed)路徑」重建 3D 路徑幾何。呼叫端做節流（角色移動 > 門檻或 pathNodes 變才呼叫），
+// 避免逐幀重建 tube 過重。路徑統一鮮紅；起點 marker = 腳下、終點 marker = 終點。
 function buildPath() {
   disposeGroup(pathGroup)
   if (!hasMask.value) return
@@ -558,20 +619,19 @@ function buildPath() {
   const yLift = sceneCellSize * 0.3
   const radius = sceneCellSize * 0.45
   const tubeMat = new THREE.MeshStandardMaterial({
-    color: 0x00ffaa,
-    emissive: 0x00ffaa,
+    color: PATH_COLOR_HEX,
+    emissive: PATH_COLOR_HEX,
     emissiveIntensity: 0.9,
     roughness: 0.3,
     metalness: 0.2,
   })
 
-  // pathNodes 來自 centered → aligned → straightened 的降級。軸向 L 形輸出常產生小幅抖動，
-  // 這裡用 DP + Bresenham 驗證簡化：只合併真的抖動（perpDist 小 + chord 可通行），真實轉角保留。
-  // eps 用 3 原始像素；小於典型走廊寬的一半，不會把路徑拉去貼牆。
-  // pixelToWorld 採零偏移公式（px=整數 = mask cell 左邊緣），這裡加半個 mask cell 的偏移
-  // 讓視覺路徑落在 A* 走過的 cell 正中央（僅影響路徑顯示、不動碰撞與玩家渲染）。
-  const raw = mapStore.pathNodes as Array<{ x: number; y: number }>
-  const simplified = dpSimplifyPath(raw, 3)
+  // 動態裁切後的路徑（第一人稱沿路走會縮短）。非第一人稱為完整路徑。
+  // 再經 DP + Bresenham 驗證簡化（清軸向抖動，真實轉角保留）。
+  // pixelToWorld 採零偏移公式，這裡加半個 mask cell 偏移讓視覺路徑落在 A* 走過的 cell 正中央。
+  const trimmed = computeTrimmedPath()
+  if (trimmed.length < 2) return
+  const simplified = dpSimplifyPath(trimmed, 3)
   const half = 0.5 / Math.max(sceneUp, 1e-9)
   const points = simplified.map((p) => {
     const w = pixelToWorld(p.x + half, p.y + half)
@@ -865,20 +925,38 @@ function tryMove(dtSec: number) {
   }
 }
 
-function updateOffPath() {
+// 每幀檢查偏離。偏離超過門檻 → 自動從當前位置重跑 A*（節流 REPLAN_MIN_INTERVAL_SEC），
+// 取代原本的手動按鈕。replan 成功則 offPath 回 false；失敗（A* 回 0，例如終點不可達）才把
+// offPath 維持 true 顯示提示 banner（fallback）。
+function updateOffPath(nowSec: number) {
   if (!mapStore.userPosition) {
     offPath.value = false
     return
   }
   const d = minDistToPath(mapStore.userPosition.x, mapStore.userPosition.y)
-  offPath.value = d > OFF_PATH_THRESHOLD_PX
+  if (d <= OFF_PATH_THRESHOLD_PX) {
+    offPath.value = false
+    return
+  }
+  // 已偏離：節流內不重複重算
+  if (nowSec - lastReplanTs < REPLAN_MIN_INTERVAL_SEC) {
+    return
+  }
+  lastReplanTs = nowSec
+  const ok = replanFromCurrent()
+  offPath.value = !ok // 重算成功 → 路徑已修正、清旗標；失敗 → 顯示提示
 }
 
-function replanFromCurrent() {
-  if (!mapStore.userPosition || !mapStore.endPoint) return
+// 從目前位置重跑 A* 到終點，回傳是否成功。pathNodes 變動會觸發 watch → buildPath 重建 3D 路徑。
+function replanFromCurrent(): boolean {
+  if (!mapStore.userPosition || !mapStore.endPoint) return false
   mapStore.setPoints({ ...mapStore.userPosition }, { ...mapStore.endPoint })
   const n = mapStore.runAStar()
-  if (n > 0) offPath.value = false
+  if (n > 0) {
+    offPath.value = false
+    return true
+  }
+  return false
 }
 
 function updateCamera() {
@@ -903,9 +981,149 @@ function updateCamera() {
   }
 }
 
+// 把整張 floodFillResultData（原始圖尺寸 RGBA 染色 buffer）畫進一張 offscreen canvas，
+// 之後 drawMinimap 用 drawImage 做局部裁切縮放（比逐像素取樣快）。資料變時重建。
+function ensureMinimapBase() {
+  const buf = mapStore.floodFillResultData
+  const w = mapStore.mapWidth
+  const h = mapStore.mapHeight
+  if (!buf || w <= 0 || h <= 0) {
+    minimapBaseTmp = null
+    return
+  }
+  // 已建且尺寸相符就沿用（floodFill 重跑時 buffer 參考會換，這裡用尺寸 + 旗標判斷簡單重建）。
+  if (minimapBaseTmp && minimapBaseTmp.canvas.width === w && minimapBaseTmp.canvas.height === h
+      && minimapBaseDirty === false) {
+    return
+  }
+  const canvas = minimapBaseTmp?.canvas ?? document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) { minimapBaseTmp = null; return }
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(buf), w, h), 0, 0)
+  minimapBaseTmp = { canvas, ctx }
+  minimapBaseDirty = false
+}
+
+// 繪製右上角 minimap：以角色為中心、半徑 MINIMAP_RADIUS_PX 的局部視窗，固定北上（不旋轉）。
+// 底圖 = floodFill 染色 + trimmed 路徑（鮮紅）+ 終點 + 角色箭頭（中心）。
+function drawMinimap() {
+  const cv = minimapCanvas.value
+  if (!cv) return
+  const ctx = cv.getContext('2d')
+  if (!ctx) return
+  const u = mapStore.userPosition
+  ctx.clearRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE)
+  if (!u) return
+
+  ensureMinimapBase()
+  const R = MINIMAP_RADIUS_PX
+  const scale = MINIMAP_SIZE / (2 * R) // 原始 px → minimap px
+  // 世界 px → minimap canvas px（以角色為中心、北上）
+  const toCv = (px: number, py: number): [number, number] => [
+    (px - u.x) * scale + MINIMAP_SIZE / 2,
+    (py - u.y) * scale + MINIMAP_SIZE / 2,
+  ]
+
+  ctx.save()
+  // 圓形裁切（雷達感）
+  ctx.beginPath()
+  ctx.arc(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2, MINIMAP_SIZE / 2, 0, Math.PI * 2)
+  ctx.clip()
+
+  // 底圖：把以角色為中心 2R×2R 的原始區域畫到整個 minimap
+  ctx.fillStyle = '#1a2433'
+  ctx.fillRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE)
+  if (minimapBaseTmp) {
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(minimapBaseTmp.canvas, u.x - R, u.y - R, 2 * R, 2 * R, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE)
+  }
+
+  // trimmed 路徑（鮮紅 + 白外框）
+  const trimmed = computeTrimmedPath()
+  if (trimmed.length >= 2) {
+    const trace = () => {
+      ctx.beginPath()
+      const [x0, y0] = toCv(trimmed[0]!.x, trimmed[0]!.y)
+      ctx.moveTo(x0, y0)
+      for (let i = 1; i < trimmed.length; i++) {
+        const [x, y] = toCv(trimmed[i]!.x, trimmed[i]!.y)
+        ctx.lineTo(x, y)
+      }
+    }
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+    trace()
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+    ctx.lineWidth = 5
+    ctx.stroke()
+    trace()
+    ctx.strokeStyle = PATH_COLOR_CSS
+    ctx.lineWidth = 3
+    ctx.stroke()
+  }
+
+  // 終點（若在視窗內）
+  if (mapStore.endPoint) {
+    const [ex, ey] = toCv(mapStore.endPoint.x, mapStore.endPoint.y)
+    ctx.beginPath()
+    ctx.arc(ex, ey, 5, 0, Math.PI * 2)
+    ctx.fillStyle = '#ffffff'
+    ctx.fill()
+    ctx.beginPath()
+    ctx.arc(ex, ey, 3.5, 0, Math.PI * 2)
+    ctx.fillStyle = '#ff4466'
+    ctx.fill()
+  }
+
+  ctx.restore() // 解除圓形裁切
+
+  // 角色箭頭（畫在中心，依 userHeading 朝向；地圖北上，故箭頭旋轉）
+  const cx = MINIMAP_SIZE / 2
+  const cy = MINIMAP_SIZE / 2
+  const h = mapStore.userHeading ?? 0
+  ctx.save()
+  ctx.translate(cx, cy)
+  ctx.rotate(h + Math.PI / 2) // heading=0 指向 +x；畫的箭頭預設朝上(-y)，故 +90°
+  ctx.beginPath()
+  ctx.moveTo(0, -8)
+  ctx.lineTo(6, 7)
+  ctx.lineTo(0, 4)
+  ctx.lineTo(-6, 7)
+  ctx.closePath()
+  ctx.fillStyle = '#ffd600'
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+  ctx.lineWidth = 1.5
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+
+  // 外圈框
+  ctx.beginPath()
+  ctx.arc(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2, MINIMAP_SIZE / 2 - 1, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+}
+
+// 角色移動超過門檻才重建 trimmed 3D 路徑（節流，避免逐幀重建 tube）。
+function maybeRebuildPath() {
+  const u = mapStore.userPosition
+  if (!u) return
+  if (lastPathBuildPos) {
+    const dx = u.x - lastPathBuildPos.x
+    const dy = u.y - lastPathBuildPos.y
+    if (dx * dx + dy * dy < PATH_REBUILD_MOVE_PX * PATH_REBUILD_MOVE_PX) return
+  }
+  lastPathBuildPos = { x: u.x, y: u.y }
+  buildPath()
+}
+
 function animate(ts?: number) {
   frameId = requestAnimationFrame(animate)
   const now = ts ?? performance.now()
+  const nowSec = now / 1000
   const dt = lastTs === 0 ? 0 : Math.min(0.05, (now - lastTs) / 1000)
   lastTs = now
 
@@ -913,7 +1131,9 @@ function animate(ts?: number) {
     ensureUserState()
     syncMoveInput() // 合併鍵盤 + 搖桿成 moveInput（每幀，tryMove 前）
     tryMove(dt)
-    updateOffPath()
+    updateOffPath(nowSec) // 偏離自動 replan（節流）
+    maybeRebuildPath() // 沿路走 → 動態裁切重建 3D 路徑（節流）
+    drawMinimap() // 右上角 2D minimap 同步角色/路徑
   } else {
     // 俯瞰模式不再自動旋轉，改由使用者透過 OrbitControls 手動操作。
     controls?.update()
@@ -926,6 +1146,10 @@ function animate(ts?: number) {
 function enterFirstPerson() {
   viewMode.value = 'first-person'
   ensureUserState()
+  // 進第一人稱：重置動態路徑/重算節流狀態，並立即依目前位置重建一次 trimmed 路徑。
+  lastPathBuildPos = null
+  lastReplanTs = 0
+  buildPath()
   // === Bug1 診斷：起點 / 起點是否可走 / snap 結果 / snap 結果是否可走 ===
   // 用來判別問題是「起點被判不可走」還是「snap 找錯點」。實測排查後可移除。
   if (mapStore.startPoint) {
@@ -968,6 +1192,8 @@ function exitFirstPerson() {
     controls.enabled = true
     controls.update()
   }
+  // 俯瞰顯示完整路徑（computeTrimmedPath 在非第一人稱回傳完整 pathNodes）。
+  buildPath()
 }
 
 // 把鍵盤(keyInput)與搖桿(joystick)合併成本幀的 moveInput。每幀呼叫一次（tryMove 前）。
@@ -1208,14 +1434,26 @@ watch(
   () => [mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight],
   () => {
     buildGeometry()
+    lastPathBuildPos = null // 強制下次 maybeRebuildPath 重建
     buildPath()
     buildAvatar()
   },
 )
 
+// floodFill 重跑 → minimap 底圖需重建。
+watch(
+  () => mapStore.floodFillResultData,
+  () => {
+    minimapBaseDirty = true
+  },
+)
+
 watch(
   () => mapStore.pathNodes,
-  () => buildPath(),
+  () => {
+    lastPathBuildPos = null // replan 換了 pathNodes → 立即重建 trimmed 路徑
+    buildPath()
+  },
   { deep: true },
 )
 
@@ -1261,6 +1499,15 @@ onBeforeUnmount(() => {
         {{ viewMode === 'first-person' ? '俯瞰' : '第一人稱' }}
       </button>
     </div>
+
+    <!-- 第一人稱右上角 2D minimap：以角色為中心的局部地圖（固定北上），每幀於 drawMinimap 更新。 -->
+    <canvas
+      v-if="viewMode === 'first-person' && hasMask"
+      ref="minimapCanvas"
+      class="minimap"
+      :width="MINIMAP_SIZE"
+      :height="MINIMAP_SIZE"
+    />
 
     <!-- 偏離路徑時可從目前位置重新跑 A*，不重新做 flood fill。 -->
     <div v-if="offPath && viewMode === 'first-person'" class="offpath-banner">
@@ -1347,6 +1594,29 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+/* 右上角 minimap：在流程按鈕下方。z-index 高於 touch-layer，但 pointer-events:none 讓觸控穿透
+   （minimap 純顯示、不吃事件，下方仍可轉視角）。圓形雷達樣式。 */
+.minimap {
+  position: absolute;
+  top: 72px;
+  right: 16px;
+  z-index: 4;
+  width: 160px;
+  height: 160px;
+  border-radius: var(--radius-circle);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  background: var(--color-scene-panel);
+}
+
+@media (max-width: 480px) {
+  .minimap {
+    width: 120px;
+    height: 120px;
+    top: 64px;
+  }
 }
 
 .scene-flow-btn {
