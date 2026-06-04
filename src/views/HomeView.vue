@@ -2,7 +2,6 @@
 import { computed, ref, toRaw } from 'vue'
 import { ImageOff, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
-import type { MapMode } from '@/stores/mapStore'
 
 const mapStore = useMapStore()
 const processTime = ref<number | null>(null)
@@ -11,6 +10,15 @@ const previewCanvas = ref<HTMLCanvasElement | null>(null)
 
 const activeTooltip = ref<string | null>(null)
 const pathStatus = ref<string | null>(null)
+
+// 輕量 toast：取代原生 alert()。顯示一段時間後自動淡出。
+const toastMsg = ref<string | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+function showToast(msg: string) {
+  toastMsg.value = msg
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => (toastMsg.value = null), 2600)
+}
 
 // 只有遮罩與路徑節點都存在時，3D 場景才有足夠資料可以建模。
 const canGoToScene = computed(() => mapStore.passableMask != null && mapStore.pathNodes.length > 0)
@@ -49,31 +57,42 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-// 將 A* 輸出的 pathNodes 疊回預覽圖，外圈黑線用來讓黃色路徑在淺色地圖上仍可辨識。
+// 將 A* 輸出的 pathNodes 疊回預覽圖。
+// 路線用鮮紅 #FF3B30，與可走區的青藍 (0,200,255) 強對比；外加白色外框，在深淺背景上都醒目。
+// 畫在可走區「上方」（正常 source-over，不用 destination-over）→ 不被半透明青藍蓋住而暗淡。
+// 線寬隨 canvas 解析度自適應：canvas 內部解析度 = 圖原始尺寸（可能很大），但 CSS 縮放顯示，
+// 若用固定 px，大圖在畫面上會變極細。改用「長邊的比例」+ 下限，確保各種尺寸畫面上都一致夠粗。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
 
-  ctx.save()
-  ctx.globalCompositeOperation = 'destination-over'
-  ctx.beginPath()
-  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
-  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)'
-  ctx.lineWidth = 5
-  ctx.lineJoin = 'round'
-  ctx.lineCap = 'round'
-  ctx.stroke()
-  ctx.restore()
+  const base = Math.max(ctx.canvas.width, ctx.canvas.height)
+  const lineW = Math.max(3, base * 0.006) // 紅線寬：約長邊 0.6%，最少 3px
+  const outlineW = lineW + Math.max(2, base * 0.004) // 白外框比紅線再寬一圈
 
-  ctx.beginPath()
-  ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
-  for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
-  ctx.strokeStyle = '#FFD600'
-  ctx.lineWidth = 3
+  const trace = () => {
+    ctx.beginPath()
+    ctx.moveTo(nodes[0]!.x, nodes[0]!.y)
+    for (let i = 1; i < nodes.length; i++) ctx.lineTo(nodes[i]!.x, nodes[i]!.y)
+  }
+
+  ctx.save()
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
+
+  // 白色外框（先畫，較寬）
+  trace()
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)'
+  ctx.lineWidth = outlineW
   ctx.stroke()
+
+  // 鮮紅主線（後畫，較窄，疊在外框上）
+  trace()
+  ctx.strokeStyle = '#FF3B30'
+  ctx.lineWidth = lineW
+  ctx.stroke()
+
+  ctx.restore()
 }
 
 // 起點與終點只畫在畫面層，不回寫到 imageRawData，避免下一次辨識把標記當成路色。
@@ -121,10 +140,10 @@ function renderToCanvas(
 
 // 呼叫 core.cpp 的 intelligentFloodFill，產生可通行遮罩後立即執行 A*。
 const runFloodFill = () => {
-  if (!mapStore.wasmModule) return alert('引擎尚未就緒')
+  if (!mapStore.wasmModule) return showToast('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
-  if (!rawData || mapStore.mapWidth === 0) return alert('尚未載入地圖')
-  if (!mapStore.seedPoint) return alert('缺少種子點，請回上傳頁重新標記')
+  if (!rawData || mapStore.mapWidth === 0) return showToast('尚未載入地圖')
+  if (!mapStore.seedPoint) return showToast('缺少種子點，請回上傳頁重新標記')
 
   const width = mapStore.mapWidth
   const height = mapStore.mapHeight
@@ -166,9 +185,6 @@ const runFloodFill = () => {
     const pointer = mapStore.wasmModule.allocateMemory(size2) as number
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
-    // mode: 0 = 色塊圖 RGB，1 = 線稿圖 HSL。
-    // const modeInt = mapStore.mapType === 'line-art' ? 1 : 0
-    const modeInt = 0
     const denoiseArea = mapStore.denoiseMinArea * up * up
     // smooth* 參數隨上採樣比例縮放：closing kernel 維持奇數（保 dilate/erode 對稱），
     // 牆塊面積閾值以 up² 倍率擴張（與 denoiseArea 同一個邏輯）。
@@ -258,8 +274,8 @@ const runFloodFill = () => {
 // 只重新跑 A*，保留上一次 flood fill 的遮罩，適合調整起訖點後快速重算。
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
-  if (!mapStore.startPoint || !mapStore.endPoint) return alert('請先設定起點與終點')
-  if (!mapStore.floodFillResultData) return alert('請先執行一次路徑識別，再使用重算路徑')
+  if (!mapStore.startPoint || !mapStore.endPoint) return showToast('請先設定起點與終點')
+  if (!mapStore.floodFillResultData) return showToast('請先執行一次路徑識別，再使用重算路徑')
 
   isRunning.value = true
   pathStatus.value = null
@@ -523,15 +539,113 @@ const runAStarOnly = () => {
         </button>
       </div>
     </template>
+
+    <!-- 運算中遮罩:取代「卡住感」,顯示 spinner + 文案。覆蓋整頁、含模糊。 -->
+    <Transition name="fade">
+      <div v-if="isRunning" class="loading-overlay">
+        <div class="loading-card">
+          <span class="spinner" aria-hidden="true" />
+          <span class="loading-text">路徑識別運算中…</span>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 輕量 toast(取代原生 alert)。放在 main 內讓本元件維持單一根節點
+         (外層 <Transition> 過場要求單根),Teleport 仍會把內容送到 body。 -->
+    <Teleport to="body">
+      <Transition name="toast">
+        <div v-if="toastMsg" class="app-toast" role="status">{{ toastMsg }}</div>
+      </Transition>
+    </Teleport>
   </main>
 </template>
 
 <style scoped>
 .home-container {
+  position: relative;
   padding: var(--space-8);
   max-width: 900px;
   margin: 0 auto;
   text-align: center;
+}
+
+/* 運算中遮罩 */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-bg-page) 60%, transparent);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.loading-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-8);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+}
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--color-bg-neutral);
+  border-top-color: var(--color-primary);
+  border-radius: var(--radius-circle);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.loading-text {
+  font-size: var(--text-md);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-secondary);
+}
+
+/* 全站 toast(此元件 teleport 到 body,故樣式不受 scoped 限制 → 用 :global) */
+:global(.app-toast) {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%);
+  z-index: 9999;
+  max-width: min(90vw, 420px);
+  padding: 12px 20px;
+  background: var(--color-text);
+  color: var(--color-bg-card);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  text-align: center;
+}
+:global(.toast-enter-active),
+:global(.toast-leave-active) {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+:global(.toast-enter-from),
+:global(.toast-leave-to) {
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px);
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 h1 {
@@ -580,18 +694,28 @@ h1 {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-5);
   border-radius: var(--radius-md);
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: var(--color-white);
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
   text-decoration: none;
-  transition: background-color 0.2s ease;
+  box-shadow: var(--shadow-sm);
+  transition:
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .empty-action:hover {
-  background: var(--color-primary-hover);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.empty-action:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .panel {
@@ -839,7 +963,7 @@ h1 {
   left: 0;
   z-index: 100;
   background: var(--color-text);
-  color: white;
+  color: var(--color-bg-card);
   font-size: var(--text-sm);
   font-weight: var(--font-normal);
   padding: var(--space-3);
@@ -868,16 +992,25 @@ h1 {
   padding: var(--space-3) var(--space-5);
   font-size: var(--text-md);
   font-weight: var(--font-semibold);
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: var(--color-white);
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.2s;
+  box-shadow: var(--shadow-sm);
+  transition:
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
   touch-action: manipulation;
 }
 .btn-run:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.btn-run:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
 }
 .btn-run:disabled {
   opacity: 0.4;
@@ -889,7 +1022,7 @@ h1 {
   padding: var(--space-3) var(--space-5);
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
-  background: var(--color-white);
+  background: var(--color-bg-card);
   color: var(--color-primary);
   border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
@@ -969,29 +1102,38 @@ canvas {
   text-decoration: none;
   cursor: pointer;
   transition:
-    background-color 0.2s ease,
-    border-color 0.2s ease,
-    color 0.2s ease,
-    opacity 0.2s ease;
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
 }
 
 .flow-btn--primary {
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: var(--color-white);
+  box-shadow: var(--shadow-sm);
 }
 
 .flow-btn--primary:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.flow-btn--primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
 }
 
 .flow-btn--secondary {
-  background: var(--color-white);
+  background: var(--color-bg-card);
   border-color: var(--color-border);
   color: var(--color-text-secondary);
 }
 
 .flow-btn--secondary:hover {
   background: var(--color-bg-hover);
+  transform: translateY(-1px);
 }
 
 .flow-btn:disabled {
