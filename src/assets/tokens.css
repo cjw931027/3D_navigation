@@ -1,70 +1,83 @@
+/* ============================================================================
+   Design tokens
+   - 淺色為預設(:root)。深色透過 (a) 跟隨系統 prefers-color-scheme
+     (b) 手動 <html data-theme="dark"> 兩條軌道覆寫(見檔末)。
+   - 顏色盡量語意化(bg/card/text/border/status),方便深色一一對應。
+   - 品牌色:Indigo(#4f46e5) → Cyan(#06b6d4),主要 CTA 用漸層。
+   ============================================================================ */
 :root {
   /* Brand */
-  --color-primary: #1565c0;
-  --color-primary-hover: #0d47a1;
-  --color-primary-ring: rgba(21, 101, 192, 0.16);
-  --color-accent: #00bcd4;
-  --color-accent-hover: #0097a7;
-  --color-success: #4caf50;
-  --color-danger: #f44336;
-  --color-danger-dark: #c62828;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-primary-ring: rgba(79, 70, 229, 0.18);
+  --color-accent: #06b6d4;
+  --color-accent-hover: #0891b2;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-danger-dark: #b91c1c;
   --color-white: #ffffff;
 
-  /* Text */
+  /* 主題漸層(CTA / 重點按鈕 / active 焦點) */
+  --gradient-primary: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #4338ca 0%, #0891b2 100%);
+
+  /* Text(收斂為常用幾階；深色會整組覆寫) */
   --color-text: #1a1a2e;
-  --color-text-secondary: #333;
-  --color-text-tertiary: #444;
-  --color-text-soft: #555;
-  --color-text-disabled: #666;
-  --color-text-muted: #888;
-  --color-text-faded: #999;
-  --color-text-placeholder: #aaa;
-  --color-text-hint: #bbb;
-  --color-text-tick: #ccc;
+  --color-text-secondary: #2f3346;
+  --color-text-tertiary: #444b5e;
+  --color-text-soft: #545b6e;
+  --color-text-disabled: #6b7280;
+  --color-text-muted: #8b91a1;
+  --color-text-faded: #9aa0b0;
+  --color-text-placeholder: #aab0c0;
+  --color-text-hint: #c2c7d4;
+  --color-text-tick: #d2d6e0;
 
   /* Surfaces / borders */
-  --color-bg-card: #f8f9ff;
-  --color-bg-soft: #f5f5f5;
-  --color-bg-hover: #f0f0f0;
-  --color-bg-neutral: #eee;
-  --color-bg-chip: #e0e0e0;
-  --color-border: #ddd;
-  --color-border-light: #e8e8e8;
+  --color-bg-page: #f4f5fb; /* 全站底色 */
+  --color-bg-card: #ffffff;
+  --color-bg-soft: #f4f5fb;
+  --color-bg-hover: #eef0f8;
+  --color-bg-neutral: #e9ebf3;
+  --color-bg-chip: #e4e7f0;
+  --color-border: #e2e5ee;
+  --color-border-light: #edeff5;
 
   /* Status panels */
   --color-warn-bg: #fff8e1;
   --color-warn-border: #ffe082;
   --color-warn-text: #6d4c00;
-  --color-info-bg: #e3f2fd;
-  --color-info-text: #006064;
-  --color-success-bg: #e8f5e9;
-  --color-success-text: #2e7d32;
+  --color-info-bg: #eef2ff; /* 改為與 indigo 同調的淺底 */
+  --color-info-text: #3730a3;
+  --color-success-bg: #ecfdf5;
+  --color-success-text: #047857;
 
   /* Map-type badge (line art) */
   --color-badge-line-bg: #f3e5f5;
   --color-badge-line-text: #6a1b9a;
 
   /* Map-type override warning */
-  --color-override-text: #e65100;
+  --color-override-text: #c2410c;
   --color-override-bg: #fff3e0;
 
-  /* Scene (3D) dark theme */
+  /* Scene (3D) dark theme(本來就深色,維持) */
   --color-scene-panel: rgba(22, 33, 62, 0.85);
-  --color-scene-text: #e0e0e0;
-  --color-scene-accent: #00c8ff;
-  --color-scene-warning: rgba(180, 40, 60, 0.9);
-  --color-scene-warning-text: #b4283c;
+  --color-scene-text: #e6e8f0;
+  --color-scene-accent: #22d3ee;
+  --color-scene-warning: rgba(180, 40, 60, 0.92);
+  --color-scene-warning-text: #fca5a5;
 
   /* Overlays */
-  --color-overlay: rgba(0, 0, 0, 0.5);
+  --color-overlay: rgba(15, 18, 30, 0.55);
 
-  /* Typography — font size */
+  /* Typography — font size(整體放大一階,標題更有份量) */
   --text-xs: 12px;
   --text-sm: 13px;
   --text-base: 14px;
   --text-md: 15px;
-  --text-h2: 22px;
-  --text-h1: 26px;
+  --text-lg: 17px;
+  --text-h2: 24px;
+  --text-h1: 30px;
 
   /* Typography — font weight */
   --font-normal: 400;
@@ -86,12 +99,146 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 18px;
   --radius-pill: 9999px;
   --radius-circle: 50%;
 
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.25);
+  /* Shadows(分層階梯,建立景深) */
+  --shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.06);
+  --shadow-sm: 0 2px 8px rgba(17, 24, 39, 0.08);
+  --shadow-md: 0 6px 18px rgba(17, 24, 39, 0.12);
+  --shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.18);
   --shadow-magnifier: 0 2px 10px rgba(0, 0, 0, 0.3);
   --shadow-thumb: 0 1px 3px rgba(0, 0, 0, 0.2);
+
+  /* Motion(統一動效時長 / 緩動) */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 0.15s;
+  --dur-base: 0.25s;
+  --dur-slow: 0.4s;
+}
+
+/* ── 深色主題(語意變數整組覆寫)──────────────────────────────
+   兩條軌道：手動 data-theme="dark" 優先；無手動設定時跟隨系統。 */
+:root[data-theme='dark'] {
+  --color-primary: #6366f1;
+  --color-primary-hover: #818cf8;
+  --color-primary-ring: rgba(99, 102, 241, 0.3);
+  --color-accent: #22d3ee;
+  --color-accent-hover: #67e8f9;
+  --color-success: #34d399;
+  --color-danger: #f87171;
+  --color-danger-dark: #ef4444;
+
+  --gradient-primary: linear-gradient(135deg, #6366f1 0%, #22d3ee 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #818cf8 0%, #67e8f9 100%);
+
+  --color-text: #e7e9f3;
+  --color-text-secondary: #d2d6e6;
+  --color-text-tertiary: #c0c5da;
+  --color-text-soft: #a8aec6;
+  --color-text-disabled: #7c8198;
+  --color-text-muted: #8b91a8;
+  --color-text-faded: #6f758c;
+  --color-text-placeholder: #5b6178;
+  --color-text-hint: #4a5066;
+  --color-text-tick: #3a4058;
+
+  --color-bg-page: #0f1320;
+  --color-bg-card: #181d2e;
+  --color-bg-soft: #141927;
+  --color-bg-hover: #222840;
+  --color-bg-neutral: #232a42;
+  --color-bg-chip: #2a3150;
+  --color-border: #2a3047;
+  --color-border-light: #232940;
+
+  --color-warn-bg: #3a2f10;
+  --color-warn-border: #5c4a18;
+  --color-warn-text: #fcd34d;
+  --color-info-bg: #1e2547;
+  --color-info-text: #c7d2fe;
+  --color-success-bg: #11352a;
+  --color-success-text: #6ee7b7;
+
+  --color-badge-line-bg: #3a1f47;
+  --color-badge-line-text: #e9d5ff;
+  --color-override-text: #fdba74;
+  --color-override-bg: #3a2410;
+
+  --color-overlay: rgba(0, 0, 0, 0.65);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  /* 只有「未手動指定 light」時才套系統深色（data-theme=light 可強制淺色）。 */
+  :root:not([data-theme='light']) {
+    --color-primary: #6366f1;
+    --color-primary-hover: #818cf8;
+    --color-primary-ring: rgba(99, 102, 241, 0.3);
+    --color-accent: #22d3ee;
+    --color-accent-hover: #67e8f9;
+    --color-success: #34d399;
+    --color-danger: #f87171;
+    --color-danger-dark: #ef4444;
+
+    --gradient-primary: linear-gradient(135deg, #6366f1 0%, #22d3ee 100%);
+    --gradient-primary-hover: linear-gradient(135deg, #818cf8 0%, #67e8f9 100%);
+
+    --color-text: #e7e9f3;
+    --color-text-secondary: #d2d6e6;
+    --color-text-tertiary: #c0c5da;
+    --color-text-soft: #a8aec6;
+    --color-text-disabled: #7c8198;
+    --color-text-muted: #8b91a8;
+    --color-text-faded: #6f758c;
+    --color-text-placeholder: #5b6178;
+    --color-text-hint: #4a5066;
+    --color-text-tick: #3a4058;
+
+    --color-bg-page: #0f1320;
+    --color-bg-card: #181d2e;
+    --color-bg-soft: #141927;
+    --color-bg-hover: #222840;
+    --color-bg-neutral: #232a42;
+    --color-bg-chip: #2a3150;
+    --color-border: #2a3047;
+    --color-border-light: #232940;
+
+    --color-warn-bg: #3a2f10;
+    --color-warn-border: #5c4a18;
+    --color-warn-text: #fcd34d;
+    --color-info-bg: #1e2547;
+    --color-info-text: #c7d2fe;
+    --color-success-bg: #11352a;
+    --color-success-text: #6ee7b7;
+
+    --color-badge-line-bg: #3a1f47;
+    --color-badge-line-text: #e9d5ff;
+    --color-override-text: #fdba74;
+    --color-override-bg: #3a2410;
+
+    --color-overlay: rgba(0, 0, 0, 0.65);
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* 尊重使用者「減少動態」偏好：關閉非必要動效。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

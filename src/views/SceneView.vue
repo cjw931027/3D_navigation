@@ -1622,26 +1622,39 @@ onBeforeUnmount(() => {
 .scene-flow-btn {
   display: inline-flex;
   align-items: center;
-  min-height: 38px;
+  min-height: 40px;
   padding: var(--space-2) var(--space-3);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-md);
   background: var(--color-scene-panel);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--color-scene-text);
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
   text-decoration: none;
   cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .scene-flow-btn:hover {
-  background: var(--color-primary-hover);
+  background: var(--gradient-primary);
   color: var(--color-white);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+.scene-flow-btn:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .scene-flow-btn--primary {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
+  border-color: transparent;
+  background: var(--gradient-primary);
   color: var(--color-white);
 }
 
@@ -1655,12 +1668,28 @@ onBeforeUnmount(() => {
 }
 .mode-btn {
   padding: var(--space-2) var(--space-4);
-  border: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-md);
   background: var(--color-scene-panel);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--color-scene-text);
   cursor: pointer;
   font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  box-shadow: var(--shadow-md);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.mode-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--color-scene-accent);
+}
+.mode-btn:active {
+  transform: translateY(0) scale(0.97);
 }
 .mode-btn.active {
   background: var(--color-scene-accent);
@@ -1691,6 +1720,13 @@ onBeforeUnmount(() => {
   color: var(--color-scene-warning-text);
   cursor: pointer;
   font-weight: var(--font-bold);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.replan-btn:hover {
+  transform: scale(1.04);
+}
+.replan-btn:active {
+  transform: scale(0.96);
 }
 
 /* 觸控層：覆蓋整個場景、承接所有 pointer 事件。touch-action:none 禁用瀏覽器手勢

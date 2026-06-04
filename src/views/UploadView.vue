@@ -663,7 +663,7 @@ h2 {
   padding: var(--space-1) var(--space-3);
   font-size: var(--text-sm);
   font-weight: var(--font-semibold);
-  background: white;
+  background: var(--color-bg-card);
   border: 1px solid var(--color-text-hint);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -718,9 +718,15 @@ h2 {
   box-shadow: var(--shadow-sm);
   text-align: left;
   transition:
-    border-color 0.2s ease,
-    box-shadow 0.2s ease,
-    background-color 0.2s ease;
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.upload-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
 }
 
 .upload-card--active {
@@ -771,21 +777,31 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 40px;
-  padding: var(--space-2) var(--space-4);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-5);
   border-radius: var(--radius-md);
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: var(--color-white);
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
   cursor: pointer;
-  transition: background 0.2s ease;
+  box-shadow: var(--shadow-sm);
+  transition:
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
   touch-action: manipulation;
   white-space: nowrap;
 }
 
 .upload-file-button:hover {
-  background: var(--color-primary-hover);
+  background: var(--gradient-primary-hover);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.upload-file-button:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .visually-hidden {
@@ -807,7 +823,7 @@ h2 {
   min-height: 320px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  background: var(--color-white);
+  background: var(--color-bg-card);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -854,7 +870,7 @@ canvas {
   border: 2px solid var(--color-text-soft);
   box-shadow: var(--shadow-magnifier);
   z-index: 9999;
-  background: white;
+  background: var(--color-bg-card);
 }
 
 /* 下一步 */
@@ -863,19 +879,30 @@ canvas {
 }
 
 .btn-primary {
+  min-height: 44px;
   padding: var(--space-3) var(--space-8);
   font-size: var(--text-md);
   font-weight: var(--font-bold);
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: white;
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.2s;
+  box-shadow: var(--shadow-sm);
+  transition:
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
   touch-action: manipulation;
 }
 .btn-primary:hover {
-  background: var(--color-primary-hover);
+  background: var(--gradient-primary-hover);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.btn-primary:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .next-section {
@@ -895,7 +922,7 @@ canvas {
   padding: var(--space-3) var(--space-6);
   font-size: var(--text-md);
   font-weight: var(--font-semibold);
-  background: white;
+  background: var(--color-bg-card);
   color: var(--color-primary);
   border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
@@ -919,7 +946,7 @@ canvas {
 
 .lm-modal-box {
   position: relative;
-  background: white;
+  background: var(--color-bg-card);
   border-radius: var(--radius-lg);
   padding: var(--space-6) var(--space-5) var(--space-5);
   max-width: 1000px;
@@ -986,7 +1013,7 @@ canvas {
   padding: 2px var(--space-3);
   font-size: var(--text-sm);
   font-weight: var(--font-semibold);
-  background: white;
+  background: var(--color-bg-card);
   border: 1px solid var(--color-text-hint);
   border-radius: var(--radius-sm);
   cursor: pointer;
