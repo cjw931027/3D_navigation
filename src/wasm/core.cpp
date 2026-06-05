@@ -530,8 +530,19 @@ void openWithBarrier(std::vector<uint8_t>& mask,
     dilateWithBarrier(mask, wallMask, width, height, kSize);
 }
 
-// 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起
-// 會被視為可走。但若該連通域有任一格屬於 wallMask，整塊都保留（屬於真牆延伸）。
+// 邊界包圍門檻：不可走連通塊翻為可走前，要求其外圈鄰居中「可走(mask==1)」占比 ≥ 此值。
+// 用途：區分「走道內被可走包圍的洞」(該補，如樓梯/閘門/動線/文字標籤啃出的缺口)
+//       與「獨立的非路面島」(不該補，如戶外圖的草地/水池/設施塊 —— 它們周圍多是其他
+//       非路面或背景，邊界可走占比低，被此門檻擋掉)。
+static constexpr float FILL_HOLE_MIN_PASSABLE_BORDER = 0.70f;
+
+// 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起、
+// 以及走道內非真牆的障礙(樓梯斜紋 / 閘門框 / 動線 / 文字圖示)啃出的缺口，會被翻為可走。
+// 三道閘同時成立才翻，確保安全：
+//   (a) 連通域面積 < minArea；
+//   (b) 不接觸 wallMask 真牆(整塊保留 → 數學上不可能穿牆)；
+//   (c) 外圈邊界鄰接可走的占比 ≥ FILL_HOLE_MIN_PASSABLE_BORDER(只補「被可走包圍的洞」，
+//       不補獨立非路面島)。
 void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
                                           const std::vector<uint8_t>& wallMask,
                                           int width, int height, int minArea) {
@@ -550,6 +561,9 @@ void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
         queue.push_back(start);
         visited[start] = true;
         bool touchesWall = false;
+        // 邊界統計：外圈鄰居(不屬於本連通域的相鄰格)中，可走 vs 邊界總數。
+        int borderTotal = 0;
+        int borderPassable = 0;
 
         for (int head = 0; head < (int)queue.size(); head++) {
             int cur = queue[head];
@@ -560,16 +574,31 @@ void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
                 int nx = cx + dx4[d], ny = cy + dy4[d];
                 if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
                 int ni = ny * width + nx;
-                if (!visited[ni] && mask[ni] == 0) {
+                if (mask[ni] == 1) {
+                    // 鄰居是可走 → 外邊界，且是「可走邊界」(分子 + 分母)。
+                    borderTotal++;
+                    borderPassable++;
+                } else if (!visited[ni]) {
+                    // 鄰居也是不可走且未訪 → 併入同一連通域(內部，不計邊界)。
                     visited[ni] = true;
                     queue.push_back(ni);
+                }
+                // 鄰居是不可走且「已訪」：可能是同塊內部(不計)，也可能是相鄰的另一塊
+                // 真牆/別的洞。為了讓「邊界可走占比」能反映被牆夾住的程度，把屬於
+                // wallMask 真牆的鄰居計入邊界分母(非可走邊界)，藉此壓低貼牆塊的比例。
+                else if (!wallMask.empty() && wallMask[ni] == 1) {
+                    borderTotal++;
                 }
             }
         }
 
-        if (!touchesWall && (int)component.size() < minArea) {
-            for (int idx : component) mask[idx] = 1;
-        }
+        if (touchesWall || (int)component.size() >= minArea) continue;
+        // 邊界可走占比門檻(borderTotal==0 表示整塊貼著影像邊界或完全內含，視為不補)。
+        if (borderTotal == 0) continue;
+        float passableBorderRatio = (float)borderPassable / (float)borderTotal;
+        if (passableBorderRatio < FILL_HOLE_MIN_PASSABLE_BORDER) continue;
+
+        for (int idx : component) mask[idx] = 1;
     }
 }
 

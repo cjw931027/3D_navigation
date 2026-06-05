@@ -93,9 +93,12 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     sampleRadius: lerp(r.sampleRadius[0], r.sampleRadius[1], t),
     spanThreshold: lerp(r.spanThreshold[0], r.spanThreshold[1], t),
     // 平滑參數獨立於靈敏度：closing 補小字洞、最小牆塊面積清掉孤立小黑點。
-    // 預設保守，使用者可在進階面板微調。
+    // smoothMinWallArea：把「面積 < 此值、不接觸真牆、且被可走區包圍」的不可走塊翻為可走。
+    // 用以補回走道內非真牆障礙(樓梯/閘門/動線/文字圖示)啃出的缺口；真牆與獨立非路面島
+    // (戶外草地等)受 wallMask 屏障與「邊界可走包圍」門檻保護不會被誤填。實測 ~600 足以
+    // 補平北車捷運通道的鋸齒缺口(飽和點約 800)。
     smoothClosingSize: 3,
-    smoothMinWallArea: 20,
+    smoothMinWallArea: 600,
   }
 }
 

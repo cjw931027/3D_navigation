@@ -38,7 +38,11 @@ const hasMask = computed(
 
 const MAP_EXTENT = 20
 const WALL_HEIGHT_RATIO = 2.0
-const MAX_CELLS_LONG_SIDE = 200
+// 3D 牆/碰撞網格的長邊上限 cell 數。mask 超過此值會被降採樣(多數決)。
+// 設太小(如 200 → 大圖 step 6)會把細走道糊斷：2D mask 全連通的終點區窄通道
+// (北車捷運區寬僅 10–30px)降採樣後咽喉被吃斷 → 3D 起訖不連通、最短路徑看似穿牆。
+// 400(大圖 step 3)可保住細走道連通；再高(600)幾何量近 9 倍、手機效能負擔大。
+const MAX_CELLS_LONG_SIDE = 400
 
 const viewMode = ref<'overview' | 'first-person'>('overview')
 // 第一人稱移動/轉向輸入。移動與視角朝向「解耦」（方案 A）：
