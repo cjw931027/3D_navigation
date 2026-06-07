@@ -128,6 +128,9 @@ let sceneWallHeight = 2
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
 let collisionH = 0
+// 綠色起點標記：角色一旦實際移動就隱藏（見 tryMove）。保留引用讓 buildPath 重建後沿用可見狀態。
+let startMarker: THREE.Mesh | null = null
+let hasMoved = false
 // px→碰撞格 / px→顯示格：值相等（都是「原始 px → ds 網格」係數），保留兩個變數只是語意分組。
 let pxToColl = 1
 let pxToDisplay = 1
@@ -617,6 +620,7 @@ function computeTrimmedPath(): Array<{ x: number; y: number }> {
 // 避免逐幀重建 tube 過重。路徑統一鮮紅；起點 marker = 腳下、終點 marker = 終點。
 function buildPath() {
   disposeGroup(pathGroup)
+  startMarker = null // 舊 marker 已隨 pathGroup dispose，清引用避免懸空（下方會重建）。
   if (!hasMask.value) return
   if (!mapStore.pathNodes || mapStore.pathNodes.length < 2) return
 
@@ -668,8 +672,10 @@ function buildPath() {
     emissive: 0xff4466,
     emissiveIntensity: 0.8,
   })
-  const startMarker = new THREE.Mesh(markerGeo, startMat)
+  startMarker = new THREE.Mesh(markerGeo, startMat)
   startMarker.position.copy(points[0]!).setY(sceneCellSize * 0.9)
+  // 角色已開始移動 → 起點標記不再顯示（buildPath 會在移動後重建，沿用隱藏狀態）。
+  startMarker.visible = !hasMoved
   const endMarker = new THREE.Mesh(markerGeo, endMat)
   endMarker.position.copy(points[points.length - 1]!).setY(sceneCellSize * 0.9)
   pathGroup.add(startMarker, endMarker)
@@ -919,6 +925,12 @@ function tryMove(dtSec: number) {
       if (!g) return
       const res = moveCircle(g, cu, cv, duTotal, dvTotal, PLAYER_RADIUS_CELLS, 0.3)
       mapStore.userPosition = { x: res.cu / pxToColl, y: res.cv / pxToColl }
+    }
+
+    // 角色一旦實際移動，隱藏綠色起點標記（只需觸發一次）。
+    if (!hasMoved) {
+      hasMoved = true
+      if (startMarker) startMarker.visible = false
     }
   }
 
@@ -1437,6 +1449,7 @@ onMounted(() => {
 watch(
   () => [mapStore.passableMask, mapStore.maskWidth, mapStore.maskHeight],
   () => {
+    hasMoved = false // 換地圖 / 重跑 flood fill → 新路線，重新顯示起點標記
     buildGeometry()
     lastPathBuildPos = null // 強制下次 maybeRebuildPath 重建
     buildPath()

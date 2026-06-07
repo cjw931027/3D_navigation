@@ -376,7 +376,15 @@ body {
     position: sticky;
     top: 0;
     z-index: 20;
-    padding: var(--space-4) var(--space-3);
+    /* 右側多留切換鈕(36px)+間距的寬度，避免絕對定位的 .theme-toggle 蓋住最右步驟。 */
+    padding: var(--space-4) calc(36px + var(--space-3) * 2) var(--space-4) var(--space-3);
+  }
+
+  /* 切換鈕在窄螢幕縮小，降低與步驟條搶空間。 */
+  .theme-toggle {
+    right: var(--space-2);
+    width: 36px;
+    height: 36px;
   }
 
   .stepper {
