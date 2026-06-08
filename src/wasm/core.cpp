@@ -202,6 +202,15 @@ static constexpr int   WALL_DARK_CHROMA_MAX     = 30;   // 彩度上限：超過
 static constexpr int   LINE_MAX_MIN_SPAN        = 3;    // 直線碎片：短邊最多幾像素
 static constexpr int   LINE_MIN_MAX_SPAN        = 20;   // 直線碎片：長邊最少幾像素
 
+// === 字塊護欄：粗體大字別被當牆（解三樓「病床電梯廳/訪客電梯廳」標題字）===
+// 「字塊」＝方塊狀(minSpan 不小) + 中等大小(maxSpan 不大) + 筆劃塞滿(填充率高)。
+// 牆的反面：空心框/牆線稀疏(fill<0.25)、細長(走規則 D)、或很長(maxSpan≥GLYPH_MAX_SPAN)。
+// 實測三樓廳標字：單字 ~37px 方塊、fill 0.39~0.78；真牆 maxSpan 數百 或 hollow。
+// 任一深色連通域若符合「字塊」三條件，直接略過所有牆規則（不視為牆）。
+static constexpr int   GLYPH_MIN_SIDE           = 12;    // 字有厚度；牆線細(minSpan 小)→不算字
+static constexpr int   GLYPH_MAX_SPAN           = 80;    // 字頂多數十px；真牆長邊遠大於此→不算字
+static constexpr float GLYPH_MIN_FILL           = 0.30f; // 字筆劃密(≥0.3)；空心框/牆線稀疏(<0.25)→不算字
+
 // === 淺灰「線狀」框線補抓 ===
 // 有些平面圖的最外圈邊界線畫得很淡（例如 hospital.jpg 外框 brightness≈213），
 // 超過 DARK_THRESHOLD(170) → 連 isDark 都進不了 → 四規則完全輪不到它判，
@@ -385,9 +394,16 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
             perimCoverage = sample > 0 ? (float)hit / (float)sample : 0.0f;
         }
 
+        // 字塊護欄：方塊狀 + 中等大小 + 筆劃密 → 視為文字，不進任何牆規則。
+        bool isGlyph = minSpan >= GLYPH_MIN_SIDE
+                    && maxSpan <  GLYPH_MAX_SPAN
+                    && fillRatio >= GLYPH_MIN_FILL;
+
         int ruleHit = 0;
         bool isWall = false;
-        if (maxSpan >= spanThreshold) {
+        if (isGlyph) {
+            // 文字：略過所有牆規則
+        } else if (maxSpan >= spanThreshold) {
             isWall = true; ruleHit = 1;                      // (A) 長牆
         } else if (bboxArea >= WALL_MIN_BBOX_AREA
                 && minSpan   >= WALL_MIN_BBOX_MIN_SPAN
@@ -651,6 +667,23 @@ static void clipMaskToRect(std::vector<uint8_t>& mask, int width, int height,
                 mask[y * width + x] = 0;
 }
 
+// 把灰色圖框「封成封閉牆」：沿矩形 4 邊畫 thick 寬的屏障（mask=0 + wallMask=1）。
+// 補掉 faint-line 偵測不全留下的缺口，讓洪水填充不再從缺口漏到框外（解 hospital 漏出）。
+// 必須在「種子連通分量限制」之前呼叫，框外才會與種子斷開而被丟棄。
+static void carveFrameWall(std::vector<uint8_t>& mask, std::vector<uint8_t>& wallMask,
+                           int width, int height,
+                           int minX, int minY, int maxX, int maxY, int thick) {
+    auto setBarrier = [&](int x, int y) {
+        if (x < 0 || x >= width || y < 0 || y >= height) return;
+        mask[y * width + x] = 0;
+        if (!wallMask.empty()) wallMask[y * width + x] = 1;
+    };
+    for (int t = 0; t < thick; t++) {
+        for (int x = minX; x <= maxX; x++) { setBarrier(x, minY + t); setBarrier(x, maxY - t); }
+        for (int y = minY; y <= maxY; y++) { setBarrier(minX + t, y); setBarrier(maxX - t, y); }
+    }
+}
+
 // 過度捕捉對策 A（clipMode=1）：裁到「所有牆」的包圍盒 + margin。
 // 用於黑框建物密集的戶外圖（場地 / 戶外）——所有牆的包圍盒≈街區範圍，圖外白底被裁掉。
 static void clipToWallBBox(std::vector<uint8_t>& mask, const std::vector<uint8_t>& wallMask,
@@ -752,6 +785,18 @@ void intelligentFloodFill(int width, int height,
         removeSmallMaskComponents(mask, width, height, denoiseMinArea);
     }
 
+    // clipMode==2：先把灰色圖框「封成封閉牆」，必須在連通分量限制之前 →
+    // 框外白底會與種子斷開、在下面的 connected-component 被丟棄（解 hospital 漏到框外）。
+    int fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+    bool hasFrame = false;
+    if (clipMode == 2) {
+        hasFrame = detectFrameBBox(mapBuffer, width, height, 0.4f, fx0, fy0, fx1, fy1);
+        if (hasFrame)
+            carveFrameWall(mask, wallMask, width, height, fx0, fy0, fx1, fy1, 4);
+        else
+            clipToWallBBox(mask, wallMask, width, height, 0.04f); // 無框則退回牆包圍盒
+    }
+
     // connected-component 限制：從「所有種子」union BFS 染色（避免多色走廊只留其中一段）。
     int searchR = 12 + wallThicken * 3;
     std::vector<uint8_t> seedMask(mask.size(), 0);
@@ -787,15 +832,13 @@ void intelligentFloodFill(int width, int height,
         removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea);
     }
 
-    // 過度捕捉對策（戶外圖白路=白圖外時，把圖外白底裁掉）。
+    // 過度捕捉對策（後處理）：
+    //   clipMode==1：裁到所有牆包圍盒（場地/戶外白底圖）。
+    //   clipMode==2：灰框已於連通分量前封牆，這裡只做保險裁切清掉框外殘留。
     if (clipMode == 1) {
         clipToWallBBox(mask, wallMask, width, height, 0.04f);
-    } else if (clipMode == 2) {
-        int fx0, fy0, fx1, fy1;
-        if (detectFrameBBox(mapBuffer, width, height, 0.4f, fx0, fy0, fx1, fy1))
-            clipMaskToRect(mask, width, height, fx0, fy0, fx1, fy1, 3);
-        else
-            clipToWallBBox(mask, wallMask, width, height, 0.04f); // 無框則退回牆包圍盒
+    } else if (clipMode == 2 && hasFrame) {
+        clipMaskToRect(mask, width, height, fx0, fy0, fx1, fy1, 0);
     }
 
     // 染色：所有最終可走像素塗青藍（多種子可能含多個連通塊，全部上色）。
