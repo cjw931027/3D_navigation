@@ -143,12 +143,11 @@ const runFloodFill = () => {
   if (!mapStore.wasmModule) return showToast('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
   if (!rawData || mapStore.mapWidth === 0) return showToast('尚未載入地圖')
-  if (!mapStore.seedPoint) return showToast('缺少種子點，請回上傳頁重新標記')
+  if (!mapStore.seedPoints.length) return showToast('缺少種子點，請回上傳頁重新標記')
 
   const width = mapStore.mapWidth
   const height = mapStore.mapHeight
   const p = mapStore.floodFillParams
-  const seed = mapStore.seedPoint
   const up = mapStore.upscaleFactor
 
   const W2 = width * up
@@ -193,11 +192,14 @@ const runFloodFill = () => {
       return v <= 1 ? 0 : v % 2 === 0 ? v + 1 : v
     })()
     const smoothMinWall = p.smoothMinWallArea * up * up
+    // 多種子：傳 seedXs / seedYs 陣列 + clipMode 給新版 WASM 介面。
+    const seedXs = mapStore.seedPoints.map((s) => Math.round(s.x * up))
+    const seedYs = mapStore.seedPoints.map((s) => Math.round(s.y * up))
     mapStore.wasmModule.intelligentFloodFill(
       W2,
       H2,
-      Math.round(seed.x * up),
-      Math.round(seed.y * up),
+      seedXs,
+      seedYs,
       p.pathColorTolerance,
       p.closingKernelSize,
       p.wallThicken,
@@ -206,6 +208,7 @@ const runFloodFill = () => {
       p.spanThreshold,
       smoothClose,
       smoothMinWall,
+      mapStore.clipMode,
     )
 
     // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
@@ -321,19 +324,29 @@ const runAStarOnly = () => {
 
     <template v-else>
       <div class="panel">
-        <!-- 路色預覽 -->
+        <!-- 路色預覽（多種子）-->
         <div class="color-row">
-          <div class="color-chip" v-if="mapStore.pathColor">
-            <span
-              class="swatch"
-              :style="{
-                background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
-              }"
-            ></span>
-            路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
-            {{ mapStore.pathColor.b }})
-          </div>
+          <template v-if="mapStore.pathColors.length">
+            <div class="color-chip" v-for="(c, i) in mapStore.pathColors" :key="i">
+              <span class="swatch" :style="{ background: `rgb(${c.r},${c.g},${c.b})` }"></span>
+              rgb({{ c.r }}, {{ c.g }}, {{ c.b }})
+            </div>
+          </template>
           <div class="color-chip muted" v-else>路色未採樣</div>
+        </div>
+
+        <!-- 圖外白底處理（戶外圖用）：白路與圖外背景同色時，把圖外裁掉 -->
+        <div class="clip-row">
+          <span class="clip-label">圖外白底處理</span>
+          <select
+            class="clip-select"
+            :value="mapStore.clipMode"
+            @change="mapStore.setClipMode(Number(($event.target as HTMLSelectElement).value) as 0 | 1 | 2)"
+          >
+            <option :value="0">無（室內多色底圖）</option>
+            <option :value="1">牆包圍盒（建物密集的戶外圖）</option>
+            <option :value="2">灰色外框（院區圖有外框線）</option>
+          </select>
         </div>
 
         <!-- 靈敏度 -->
@@ -731,7 +744,33 @@ h1 {
 
 .color-row {
   display: flex;
-  margin-bottom: var(--space-6);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+/* 圖外白底處理選擇器 */
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+.clip-label {
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+  font-weight: var(--font-semibold);
+}
+.clip-select {
+  flex: 1;
+  min-height: 38px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-white);
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  cursor: pointer;
 }
 
 .color-chip {

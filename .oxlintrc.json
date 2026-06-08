@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["eslint", "typescript", "unicorn", "oxc", "vue"],
+  "ignorePatterns": ["harness/**", "dist/**", "node_modules/**", "src/wasm/core.js"],
   "env": {
     "browser": true
   },
