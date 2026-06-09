@@ -38,23 +38,12 @@ const hasMask = computed(
 
 const MAP_EXTENT = 20
 const WALL_HEIGHT_RATIO = 2.0
-// 3D 牆/碰撞網格的長邊上限 cell 數。mask 超過此值會被降採樣(多數決)。
-// 設太小(如 200 → 大圖 step 6)會把細走道糊斷：2D mask 全連通的終點區窄通道
-// (北車捷運區寬僅 10–30px)降採樣後咽喉被吃斷 → 3D 起訖不連通、最短路徑看似穿牆。
-// 400(大圖 step 3)可保住細走道連通；再高(600)幾何量近 9 倍、手機效能負擔大。
+// 3D 牆/碰撞網格的長邊上限 cell 數，超過則降採樣。太小會把細走道糊斷、太大則幾何量爆增。
 const MAX_CELLS_LONG_SIDE = 400
 
 const viewMode = ref<'overview' | 'first-person'>('overview')
-// 第一人稱移動/轉向輸入。移動與視角朝向「解耦」（方案 A）：
-//   fwd    : 前進(+)/後退(-)，沿視角前方。範圍 [-1,1]（搖桿類比；鍵盤給 ±1）。
-//   strafe : 右側移(+)/左側移(-)，沿視角右方，「不」改變視角朝向。範圍 [-1,1]。
-//   rot    : 轉視角(+右/-左)，僅鍵盤 A/D/←/→ 使用（離散 ±1）。觸控轉視角不走這裡，
-//            而是直接累加 userHeading（見 onLookMove），兩條路徑共用 userHeading 不互相覆蓋。
-// animation loop 依 dt 把 fwd/strafe 積分成位移、把 rot 積分成 heading 增量。
-//
-// 鍵盤與搖桿「不互相覆蓋」：分別存到 keyInput 與 joystick，每幀在 syncMoveInput() 合併成
-// moveInput。fwd/strafe 取「絕對值較大者」（讓任一輸入源都能單獨驅動，且搖桿類比量不會被
-// 鍵盤的 ±1 永遠壓過、鍵盤也不會被靜止的搖桿歸零）；rot 只有鍵盤會用。
+// 第一人稱移動輸入（移動與視角解耦）：fwd 前後、strafe 左右側移、rot 轉視角（僅鍵盤）。
+// 鍵盤與搖桿每幀在 syncMoveInput() 合併，fwd/strafe 取絕對值較大者。
 const moveInput = reactive({ fwd: 0, strafe: 0, rot: 0 })
 // 鍵盤輸入（離散）：fwd ∈ {-1,0,1}（W/S），rot ∈ {-1,0,1}（A/D 轉視角）。鍵盤不出 strafe。
 const keyInput = reactive({ fwd: 0, rot: 0 })
@@ -88,16 +77,10 @@ const JOYSTICK_DEADZONE = 0.15
 // 0.30 = 下方 30%。比例相對 touch-layer（場景區）高度，非整個視窗。調大 = 搖桿區更寬。
 const JOYSTICK_ZONE_RATIO = 0.30
 
-// === 虛擬搖桿狀態（浮動式：按下即在手指處生成）===
-// jx/jy ∈ [-1,1]：以底座中心為原點、正規化到單位圓的搖桿頭偏移（已夾住、未套死區）。
-//   jx：右(+)/左(-)；jy：上(+,前進)/下(-,後退)（畫面 y 往下為正，故取負後對應前進）。
-// active：搖桿是否被按住（true=浮動在手指處且不透明；false=回到 idle 預設位置半透明）。
-// knobX/knobY：搖桿頭相對底座中心的「像素」位移，純視覺，給 template 綁 transform。
-// baseX/baseY：底座中心的螢幕座標（active 時 = 手指按下處）。idle 時走 CSS 預設位置，
-//   故 baseX/baseY 僅在 active 時用於 inline 定位（見 template 的 :style 條件）。
+// 虛擬搖桿狀態（浮動式）。jx/jy∈[-1,1] 正規化偏移；active 是否按住；knobX/Y 純視覺位移；
+// baseX/Y 底座中心螢幕座標（active 時 = 手指按下處）。
 const joystick = reactive({ jx: 0, jy: 0, active: false, knobX: 0, knobY: 0, baseX: 0, baseY: 0 })
-// debug 疊層：顯示目前 (jx, jy) 與 userHeading。預設關閉（正式使用不需要、手機尺寸會被底部按鈕擋）；
-// 將來除錯可手動把此值改 true 或在 console 設定。.touch-debug 元件本身保留。
+// debug 疊層：顯示 (jx,jy) 與 userHeading，預設關閉。
 const showDebug = ref(false)
 const debugHeading = ref(0)
 // template 不可直接用 Math，這裡把 heading 轉成度數字串供 debug 疊層顯示。
@@ -108,8 +91,7 @@ const JOYSTICK_BASE_RADIUS = 60
 // 搖桿頭最大可離開中心的像素（略小於底座半徑，留邊）。pointermove 正規化以此為準。
 const JOYSTICK_KNOB_RANGE = 44
 
-// 多點觸控分流：分別記錄「搖桿手指」與「轉視角手指」的 pointerId，允許左手搖桿 + 右手滑屏同時。
-// null 代表該角色目前沒有手指佔用。絕不可用單一全域 pointer 狀態，否則第二指會搶走第一指。
+// 多點觸控分流：分別記錄搖桿/轉視角手指的 pointerId（允許雙指同時，勿用單一全域狀態）。
 let joystickPointerId: number | null = null
 let lookPointerId: number | null = null
 // 轉視角手指的上一個 clientX，用來算每次 move 的水平位移量（delta）。
@@ -134,9 +116,7 @@ let hasMoved = false
 // px→碰撞格 / px→顯示格：值相等（都是「原始 px → ds 網格」係數），保留兩個變數只是語意分組。
 let pxToColl = 1
 let pxToDisplay = 1
-// 輪廓線段碰撞（主路徑）：把視覺牆用的「簡化+內偏後輪廓」轉成線段並建空間網格，
-// 圓形碰撞直接吃這些線段 → 碰撞邊界 = 視覺牆邊界，貼牆順滑無階梯、不穿牆。
-// null 代表走 box fallback（網格碰撞）。
+// 輪廓線段碰撞：圓形碰撞直接吃簡化輪廓線段（碰撞=視覺牆邊界、不穿牆）。null 則走 box fallback。
 let collisionSegs: SegGrid | null = null
 
 function disposeGroup(group: THREE.Group) {
@@ -193,9 +173,7 @@ function downsampleMask(
   return { data, width: dw, height: dh }
 }
 
-// 移除與通行區相接超過 3 邊的孤立牆塊，避免 3D 牆面出現鋸齒突起。
-// 保留理由（greedy meshing 後）：仍能讓走廊裡 1 cell 寬的雜訊牆消失，減少切割大地板矩形的機會、
-// 順便降 wall rect 數。動作只翻 ds.data，不會破壞「視覺 = 碰撞同源」（兩者都讀 ds.data）。
+// 移除與通行區相接超過 3 邊的孤立牆塊（1 cell 寬雜訊牆），減少 3D 牆面鋸齒；只改 ds.data。
 function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
   for (let pass = 0; pass < 3; pass++) {
     let changed = false
@@ -232,9 +210,7 @@ function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
 }
 
 
-// DP 簡化 pathNodes：若中間節點到 chord 的 perpDist 在 eps 之內、且 chord 在原始
-// passableMask 上 Bresenham 可通行，就丟棄。用於清除 store 端 axisAlignPath 產生的
-// 小範圍軸向抖動；有真實轉彎（perpDist > eps）時會保留，不會把路徑拉去貼牆。
+// DP 簡化 pathNodes：中間節點到 chord 的垂距 < eps 且 chord 可通行就丟棄（清軸向抖動，真實轉角保留）。
 function dpSimplifyPath(
   nodes: Array<{ x: number; y: number }>,
   epsPx: number,
@@ -315,31 +291,14 @@ function dpSimplifyPath(
 }
 
 function pixelToWorld(px: number, py: number): { x: number; z: number } {
-  // isPassableAtPixel 用 floor(px × sceneUp) 直接映射 mask cell，隱含 px 是連續的 mask 座標
-  // ÷ sceneUp：px=0 對應 mask 座標 0（最左 cell 左邊緣），不是格中央。渲染必須採同一個
-  // 公式、不加任何 +0.5 偏移，否則玩家 render 位置會比 collision 判定系統性地推偏半格，
-  // 在牆邊就會出現「畫面穿牆但還沒撞到／已撞到卻看起來還沒到牆」。
+  // 渲染與碰撞用同一個零偏移映射公式（不加 +0.5），否則玩家畫面位置會比碰撞判定偏半格。
   return {
     x: px * pxToDisplay * sceneCellSize - sceneHalfW,
     z: py * pxToDisplay * sceneCellSize - sceneHalfH,
   }
 }
 
-// === 玩家圓形碰撞 ===
-// 把玩家視為「以位置為圓心、半徑 PLAYER_RADIUS_CELLS 的圓」，圓周不得與任何牆 cell 重疊。
-// 單位是 ds 網格 cell（= 視覺幾何 cell = collision cell；pxToColl == pxToDisplay）。
-//
-// 數值選擇：
-//   camera.near = 0.01 world units（見 PerspectiveCamera）。
-//   一個 ds cell 的世界尺寸 = sceneCellSize = MAP_EXTENT / max(width, height)
-//     典型平面圖 (downsample 後 maxDim ≤ 200, MAP_EXTENT=20) ⇒ ≈ 0.1 world／cell
-//     ⇒ camera.near ≈ 0.1 cell
-//   半徑 0.35 cell（≈ camera.near 的 3.5 倍）：
-//     - 第一人稱近裁面與牆面之間永遠有 0.25 cell 的緩衝，畫面不會穿牆。
-//     - 走廊最窄為 1 cell；圓直徑 0.7 < 1，正常走廊不會卡住。
-//
-// 重要：此常數固定以「ds cell」為單位，不受原始 mask 解析度或 upscaleFactor 影響
-//   （因為 pxToColl 同步把 px → ds cell，玩家半徑相對於世界尺寸維持 0.35 × sceneCellSize）。
+// 玩家圓形碰撞半徑，單位為 ds cell。0.35（直徑 0.7 < 1 cell 走廊）兼顧不穿牆與不卡窄走廊。
 const PLAYER_RADIUS_CELLS = 0.35
 
 function collisionGrid(): GridMask | null {
@@ -347,10 +306,7 @@ function collisionGrid(): GridMask | null {
   return { data: collisionMask, width: collisionW, height: collisionH }
 }
 
-// (px,py) 換算後的 ds-cell 是否落在「可走區內部」（smoothedMask = 輪廓多邊形的柵格化，
-// 即視覺地板覆蓋的格子）。這是 canStandAtPoly 缺的那一半判定：
-//   canStandAtPoly 只檢查「圓心到線段距離 ≥ R」，對「地圖外的空曠處」（附近沒有任何線段）
-//   會誤判為可站（距離無限大 ≥ R）。加上「必須在 smoothedMask 內」才能排除界外點。
+// (px,py) 是否落在可走區內部（smoothedMask）。補 canStandAtPoly 缺的一半：排除地圖外空曠處被誤判可站。
 function isInsideWalkable(px: number, py: number): boolean {
   if (!collisionMask || collisionW <= 0 || collisionH <= 0) return false
   const cx = Math.floor(px * pxToColl)
@@ -359,11 +315,7 @@ function isInsideWalkable(px: number, py: number): boolean {
   return collisionMask[cy * collisionW + cx] === 1
 }
 
-// 玩家中心是否可以站在 (px, py)。
-// 輪廓模式：兩個條件都要過 —
-//   (a) 圓心落在可走區內部（isInsideWalkable，排除地圖外空曠處被誤判可站）；
-//   (b) 圓心到任一輪廓線段距離 ≥ R（canStandAtPoly，碰撞 = 視覺牆邊界、不穿牆）。
-// box fallback：退回網格版 canStandAt（其網格判定本身已含界外=牆，不需 (a)）。
+// 玩家中心能否站在 (px,py)。輪廓模式：須在可走區內 + 圓心到輪廓線段距離 ≥ R；box fallback 用網格版。
 function isPassableAtPixel(px: number, py: number): boolean {
   if (collisionSegs) {
     if (!isInsideWalkable(px, py)) return false
@@ -403,10 +355,7 @@ function buildGeometry() {
   collisionW = width
   collisionH = height
 
-  // 走廊寬度健檢：downsample 後 1 cell 對應 step 個原始 mask cell；
-  // PLAYER_RADIUS_CELLS=0.35 換算後直徑 0.7 ds-cell，1 cell 寬走廊在 ds 上仍可塞下。
-  // 若原圖的窄走廊在 downsample 多數決下被吃成 0 cell，玩家無法進入 — 屬於 downsample
-  // 本身的限制，需藉由提高 MAX_CELLS_LONG_SIDE 或調整 PLAYER_RADIUS_CELLS 解決。
+  // 走廊寬度健檢：grid 太小時警告（窄走廊可能被 downsample 吃斷，需提高 MAX_CELLS_LONG_SIDE）。
   if (width < 3 || height < 3) {
     console.warn(
       '[SceneView] downsampled grid is very small (%dx%d); 0.35-cell player may not fit narrow corridors. Consider raising MAX_CELLS_LONG_SIDE.',
@@ -415,18 +364,8 @@ function buildGeometry() {
     )
   }
 
-  // === 視覺幾何：輪廓抽取 + Douglas-Peucker 簡化 + smoothedMask 烤回 ===
-  //
-  // 使用 contourUtils 的 marching-squares 邊界抽取 + 鄰接表多邊匯集 + 最右轉串環，
-  // 取代舊版 Map<number,number> 一對一串環（後者在多邊匯集頂點覆蓋前寫 → 斜線區串斷）。
-  //
-  // 管線：extractBoundaryEdges → traceRings → classify → DP 簡化 → inwardBias
-  //       → scanlineFill（烤回 smoothedMask）→ 視覺牆面 + 地板幾何。
-  //
-  // 碰撞遮罩（smoothedMask）與視覺牆面由同一組簡化後輪廓衍生，形狀一致。
-  // circleCollision.ts 完全不改（仍吃 Uint8Array 網格）。
-  //
-  // 開關：USE_CONTOUR_WALLS = false 時回退到 box-per-cell 舊版（debug 用）。
+  // 視覺幾何：輪廓抽取 → DP 簡化 → 內偏 → 烤回 smoothedMask → 牆面 + 地板。
+  // 碰撞與視覺牆由同一組簡化輪廓衍生、形狀一致。USE_CONTOUR_WALLS=false 回退 box-per-cell（debug）。
   const USE_CONTOUR_WALLS = true
   const DP_EPSILON_CELLS = 0.8   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
   const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
@@ -467,10 +406,7 @@ function buildGeometry() {
   const contour = extractAndRasterize(data, width, height, DP_EPSILON_CELLS, INWARD_BIAS_CELLS)
   const { simpOuters, simpHolesByOuter, allRings, smoothedMask, stats } = contour
 
-  // === 碰撞改用「輪廓線段」（與視覺牆完全同一條多邊形）===
-  // allRings = 簡化+內偏後的所有輪廓環（外環+holes），即視覺牆 quad 用的同一串線。
-  // 轉成線段 + 空間網格，圓形碰撞直接吃線段 → 碰撞邊界 = 視覺斜線，無階梯、不穿牆。
-  // 座標為 ds-cell 單位，與 pxToColl 一致（px * pxToColl = ds-cell）。
+  // 碰撞改用輪廓線段（與視覺牆同一串環）：轉成線段 + 空間網格，碰撞邊界 = 視覺斜線、不穿牆。
   collisionSegs = buildSegGrid(ringsToSegments(allRings))
   // smoothedMask 仍保留給 snapToNearestPassable 當「找初始可走點」的粗定位用（見該函式）。
   collisionMask = smoothedMask
@@ -574,8 +510,7 @@ function buildGeometry() {
   )
 }
 
-// 動態指引路徑：找 userPosition 在 pathNodes 折線上的最近投影點，回傳「從腳下到終點」的節點序列
-//（原始 px 座標）。沿路走時前段被裁掉 → 路徑視覺上縮短。第一人稱外（無 userPosition）回傳完整 pathNodes。
+// 動態指引路徑：從 userPosition 在路徑上的最近投影點回傳「腳下到終點」的節點（沿路走會縮短）。
 function computeTrimmedPath(): Array<{ x: number; y: number }> {
   const nodes = mapStore.pathNodes as Array<{ x: number; y: number }>
   if (!nodes || nodes.length < 2) return nodes ?? []
@@ -616,8 +551,7 @@ function computeTrimmedPath(): Array<{ x: number; y: number }> {
   return out
 }
 
-// 依「目前動態(trimmed)路徑」重建 3D 路徑幾何。呼叫端做節流（角色移動 > 門檻或 pathNodes 變才呼叫），
-// 避免逐幀重建 tube 過重。路徑統一鮮紅；起點 marker = 腳下、終點 marker = 終點。
+// 依目前 trimmed 路徑重建 3D 路徑幾何（呼叫端節流避免逐幀重建 tube）。
 function buildPath() {
   disposeGroup(pathGroup)
   startMarker = null // 舊 marker 已隨 pathGroup dispose，清引用避免懸空（下方會重建）。
@@ -634,9 +568,7 @@ function buildPath() {
     metalness: 0.2,
   })
 
-  // 動態裁切後的路徑（第一人稱沿路走會縮短）。非第一人稱為完整路徑。
-  // 再經 DP + Bresenham 驗證簡化（清軸向抖動，真實轉角保留）。
-  // pixelToWorld 採零偏移公式，這裡加半個 mask cell 偏移讓視覺路徑落在 A* 走過的 cell 正中央。
+  // trimmed 路徑經 DP 簡化後轉世界座標；加半 cell 偏移讓路徑落在 A* 走過的 cell 正中央。
   const trimmed = computeTrimmedPath()
   if (trimmed.length < 2) return
   const simplified = dpSimplifyPath(trimmed, 3)
@@ -698,19 +630,8 @@ function buildAvatar() {
   avatarGroup.add(body)
 }
 
-// 找離 (px, py) 最近、且玩家圓 (R=PLAYER_RADIUS_CELLS) 可整個塞進去的合法位置，回原始像素座標。
-//
-// 修法（取代舊版「BFS 取第一個 cell 中心」）：
-//   舊版只取每個 cell 的「中心」驗證、且回「BFS 順序第一個」通過者。問題：
-//     - 半徑 0.35 cell 在貼牆走道中，cell 中心常剛好離牆 < R → 該 cell 整顆被否決，
-//       BFS 可能略過真正最近的合法落點（其實只需在 cell 內偏一點點）。
-//     - 全找不到時回傳原始點（可能在地圖外）→ 玩家被丟到界外、走不動。
-//   新版：
-//     1. 候選來源 = A* pathNodes（保證在路線上、可走）優先，再加 smoothedMask 可走 cell；
-//        smoothedMask 是輪廓多邊形柵格化，必在可走區內部 → 不會選到界外。
-//     2. 每個可走 cell 做 3×3 子取樣（不只中心），用 isPassableAtPixel 驗證（內部 + 圓不撞牆）。
-//     3. 取「離目標最近」的合法點（全域最小距離），不是 BFS 第一個。
-//     4. 完全找不到合法落點時，退回「最近的可走 cell 中心」（至少在地圖內），並 warn。
+// 找離 (px,py) 最近、且玩家圓能整個塞進去的合法位置（回原始像素座標）。
+// 候選 = A* pathNodes + smoothedMask 可走 cell，各做 3×3 子取樣驗證取全域最近；全找不到退回最近可走 cell 中心。
 function snapToNearestPassable(px: number, py: number): { x: number; y: number } {
   // 原地已合法就直接回傳
   if (isPassableAtPixel(px, py)) return { x: px, y: py }
@@ -890,11 +811,7 @@ function tryMove(dtSec: number) {
     mapStore.userHeading = heading + moveInput.rot * ROT_SPEED * dtSec
   }
 
-  // 移動向量（strafe 模型，相對目前視角）：
-  //   fwd    沿「前方向」=(cos h, sin h)
-  //   strafe 沿「右方向」=(cos(h+π/2), sin(h+π/2)) = (-sin h, cos h)
-  //   世界移動方向 = fwd × 前方向 + strafe × 右方向
-  // 兩軸合成後再夾住長度 ≤ 1（避免斜推時 fwd² + strafe² > 1 造成對角線比直線快）。
+  // 移動向量（strafe 模型）：fwd 沿前方向、strafe 沿右方向合成，夾住長度 ≤ 1 避免斜推更快。
   let fwd = moveInput.fwd
   let strafe = moveInput.strafe
   const inputMag = Math.hypot(fwd, strafe)
@@ -941,9 +858,7 @@ function tryMove(dtSec: number) {
   }
 }
 
-// 每幀檢查偏離。偏離超過門檻 → 自動從當前位置重跑 A*（節流 REPLAN_MIN_INTERVAL_SEC），
-// 取代原本的手動按鈕。replan 成功則 offPath 回 false；失敗（A* 回 0，例如終點不可達）才把
-// offPath 維持 true 顯示提示 banner（fallback）。
+// 每幀檢查偏離：超過門檻就節流重跑 A*。重算成功 → offPath=false；失敗才維持 true 顯示提示。
 function updateOffPath(nowSec: number) {
   if (!mapStore.userPosition) {
     offPath.value = false
@@ -1212,10 +1127,7 @@ function exitFirstPerson() {
   buildPath()
 }
 
-// 把鍵盤(keyInput)與搖桿(joystick)合併成本幀的 moveInput。每幀呼叫一次（tryMove 前）。
-//   fwd/strafe：取「絕對值較大」的來源 —— 搖桿推到底(±1)等同鍵盤，搖桿類比小量也能生效，
-//               鍵盤按住時不會被靜止搖桿(0)歸零。strafe 只有搖桿會出（鍵盤不側移）。
-//   rot       ：只有鍵盤（A/D/←/→ 轉視角）；觸控轉視角直接改 userHeading，不經此。
+// 把鍵盤與搖桿合併成本幀 moveInput：fwd 取絕對值較大者、strafe 只有搖桿、rot 只有鍵盤。
 function syncMoveInput() {
   const jx = Math.abs(joystick.jx) >= JOYSTICK_DEADZONE ? joystick.jx : 0
   const jy = Math.abs(joystick.jy) >= JOYSTICK_DEADZONE ? joystick.jy : 0
@@ -1259,29 +1171,11 @@ function onKey(down: boolean, e: KeyboardEvent) {
 const onKeyDown = (e: KeyboardEvent) => onKey(true, e)
 const onKeyUp = (e: KeyboardEvent) => onKey(false, e)
 
-// ============================================================================
-// 觸控操控（第一人稱）：虛擬搖桿 + 滑屏轉視角，多點觸控分流
-// ============================================================================
-//
-// 【pointerId 分流】所有觸控事件掛在覆蓋全螢幕的 .touch-layer 上，pointerdown 依「落點」
-//   決定這根手指是「搖桿」還是「轉視角」，並把它的 pointerId 記到 joystickPointerId 或
-//   lookPointerId。之後 pointermove / pointerup 一律先比對 e.pointerId，只處理屬於自己
-//   角色的那根手指 → 搖桿與轉視角可同時、互不干擾（不綁左右手）。絕不用單一全域 pointer 狀態。
-//
-// 【區域劃分（浮動式）】落點在「畫面下方 JOYSTICK_ZONE_RATIO 比例」→ 搖桿（底座浮動生成在手指按下處）；
-//   落點在「上方其餘」→ 轉視角。手指一旦歸搖桿，後續滑到上方也仍算搖桿（用 pointerId 鎖定），
-//   不會半途變成轉視角；反之亦然。
-//
-// 【搖桿向量】updateJoystickFromPointer 以「按下處（=底座中心）」為原點算 (dx,dy) 像素位移，
-//   除以 JOYSTICK_KNOB_RANGE 正規化，長度 >1 夾回 1。jx=右(+)/左(-)；螢幕 y 往下為正，
-//   前進要正，故 jy = -dy/range（手指往上 → dy<0 → jy>0 → 前進）。死區在 syncMoveInput 套用。
-//
-// 【轉視角】onLookMove 取本次 clientX - 上次 clientX 的水平 delta × LOOK_SENSITIVITY，
-//   累加到 userHeading。垂直方向忽略（目前只做 yaw，相機維持平視）。
+// === 觸控操控（第一人稱）：虛擬搖桿 + 滑屏轉視角，多點觸控分流 ===
+// 觸控事件掛在 .touch-layer，pointerdown 依落點分給搖桿或轉視角並鎖定 pointerId（雙指互不干擾）。
+// 下方 JOYSTICK_ZONE_RATIO 區為搖桿（浮動生成在按下處），其餘為轉視角（水平 delta 累加 userHeading）。
 
-// 落點是否在「搖桿生效區」（touch-layer 下方 JOYSTICK_ZONE_RATIO 比例）。
-// 用 touch-layer 自身的 rect（非 window.innerHeight）算相對位置，因為場景上方有 header/步驟條，
-// 用視窗高度會對不準。relativeY=0 為頂、1 為底；落在底部 ratio 帶內 → 搖桿區。
+// 落點是否在搖桿生效區（touch-layer 下方 JOYSTICK_ZONE_RATIO 比例，用 layer 自身 rect 算）。
 function isInJoystickZone(clientY: number, layer: HTMLElement): boolean {
   const rect = layer.getBoundingClientRect()
   if (rect.height <= 0) return false
@@ -1313,9 +1207,7 @@ function resetJoystick() {
   joystickPointerId = null
 }
 
-// 觸控事件是否落在 UI 控制項（按鈕/連結）上。雖然這些 UI 的 z-index 已高於 touch-layer
-// → 正常情況 pointerdown 會直接命中按鈕、不會進到這裡；但為防呆（瀏覽器差異 / 事件冒泡），
-// 仍在此判斷 e.target 是否在互動控制項內，是的話讓事件穿透（不轉成搖桿/轉視角）。
+// 觸控落點是否在 UI 控制項（按鈕/連結）上：是的話讓事件穿透，不轉成搖桿/轉視角（防呆）。
 function isUiControlTarget(e: PointerEvent): boolean {
   const t = e.target as HTMLElement | null
   if (!t || typeof t.closest !== 'function') return false
@@ -1326,11 +1218,9 @@ function onTouchPointerDown(e: PointerEvent) {
   if (viewMode.value !== 'first-person') return
   // 落在 UI 按鈕上 → 不處理，讓點擊穿透到按鈕（俯瞰切換/流程/重新規劃皆可點）。
   if (isUiControlTarget(e)) return
-  // 搖桿落點（浮動式）：手指落在「畫面下方搖桿區」且搖桿尚未被別的手指佔用 → 歸搖桿，
-  // 底座中心 = 手指按下處（不是固定 DOM 中心），knob 從該點起算 → 手指永遠在搖桿中心附近、不會滑出。
+  // 搖桿落點（浮動式）：手指落在下方搖桿區且未被佔用 → 歸搖桿，底座中心 = 手指按下處。
   const layer = e.currentTarget as HTMLElement // = .touch-layer，用來算下方比例
-  // setPointerCapture：把這根 pointer 綁定到 touch-layer，之後 pointermove/up 即使手指滑出
-  // canvas 邊界（甚至滑出視窗）仍持續送到此元素 → 不會「滑出去就失去操控/卡住不歸零」。
+  // setPointerCapture：綁定 pointer 到 touch-layer，手指滑出邊界仍持續收到事件、不卡住。
   const capture = () => {
     try { layer.setPointerCapture(e.pointerId) } catch { /* 某些環境不支援，忽略 */ }
   }
@@ -1613,8 +1503,7 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 
-/* 右上角 minimap：在流程按鈕下方。z-index 高於 touch-layer，但 pointer-events:none 讓觸控穿透
-   （minimap 純顯示、不吃事件，下方仍可轉視角）。圓形雷達樣式。 */
+/* 右上角 minimap：圓形雷達樣式，pointer-events:none 讓觸控穿透（純顯示、下方仍可轉視角）。 */
 .minimap {
   position: absolute;
   top: 72px;
@@ -1746,8 +1635,7 @@ onBeforeUnmount(() => {
   transform: scale(0.96);
 }
 
-/* 觸控層：覆蓋整個場景、承接所有 pointer 事件。touch-action:none 禁用瀏覽器手勢
-   （捲動/縮放/雙擊放大），確保搖桿拖曳與滑屏轉視角不被攔截。user-select:none 防選字。 */
+/* 觸控層：覆蓋場景承接 pointer 事件。touch-action:none 禁用瀏覽器手勢，避免攔截搖桿/轉視角。 */
 .touch-layer {
   position: absolute;
   inset: 0;
@@ -1757,10 +1645,8 @@ onBeforeUnmount(() => {
   -webkit-user-select: none;
 }
 
-/* 浮動虛擬搖桿底座。尺寸 = JOYSTICK_BASE_RADIUS×2（120px），須與 script 常數一致。
-   position:fixed + translate(-50%,-50%)：以「中心」對齊定位點（idle=CSS 預設、active=inline 手指座標）。
-   用 fixed（視口座標）讓 active 時的 inline left/top（= pointer clientX/Y，視口座標）精準跟手。
-   idle（未按）：水平置中、垂直約 62%（中下、比正中略高），半透明淡隱、不擋視線、提示搖桿在左半可用。 */
+/* 浮動虛擬搖桿底座（直徑須與 script 的 JOYSTICK_BASE_RADIUS 一致）。
+   position:fixed + translate(-50%,-50%) 以中心對齊定位點；active 時跟手指、idle 時半透明置中下。 */
 .joystick-base {
   position: fixed;
   left: 50%;
@@ -1920,8 +1806,7 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 桌機/寬螢幕（非手機）：畫面較高，idle 搖桿再往下一點，更貼近底部、不擋視線。
-   active 跟手不受影響（inline 座標）。 */
+/* 桌機/寬螢幕：idle 搖桿往下貼近底部、不擋視線（active 跟手不受影響）。 */
 @media (min-width: 721px) {
   .joystick-base {
     top: 82%;

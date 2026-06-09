@@ -1,11 +1,5 @@
-// polyCollision.ts — 圓 vs 多邊形線段碰撞（純函式，不依賴 three / vue，可離線測試）。
-//
-// 動機：視覺牆面用的是 contourUtils 簡化後的「平滑輪廓多邊形」。若碰撞改回網格 mask，
-// 斜邊又變回階梯 → 貼牆手感與視覺不一致、且形狀錯位造成穿牆。本模組讓碰撞直接吃
-// 「輪廓線段」，碰撞邊界 = 視覺牆邊界，完全一致。
-//
-// 座標：與 SceneView 的 pxToColl 同一系統（ds-cell 單位）。半徑 R 亦同單位。
-// 「可站」定義：圓心到所有線段的最短距離皆 ≥ R（嚴格小於 R 才算撞牆，留 epsilon 容差）。
+// polyCollision.ts — 圓 vs 多邊形線段碰撞（純函式，可離線測試）。讓碰撞直接吃輪廓線段，
+// 碰撞邊界 = 視覺牆邊界、不穿牆。座標同 pxToColl(ds-cell)；「可站」= 圓心到所有線段距離 ≥ R。
 
 export interface Seg {
   ax: number
@@ -249,10 +243,7 @@ export function stepCirclePoly(
   return { cu: fixed.cu, cv: fixed.cv, blocked: true }
 }
 
-// 切 substep 後逐次套用 stepCirclePoly。
-// 關鍵：撞牆（blocked）不再直接結束本幀——只要該 substep 仍有前進（沿牆滑行），就繼續用
-// 同一個原始 substep 方向處理剩餘 substep，讓玩家能沿整面牆連續滑行。
-// 只有當某個 substep 完全沒前進（位移 < EPS，即死角夾死）時才提前結束。
+// 切 substep 逐次套用 stepCirclePoly：撞牆仍有前進就繼續滑行，只有完全卡死（死角）才提前結束。
 export function moveCirclePoly(
   grid: SegGrid,
   cu: number,

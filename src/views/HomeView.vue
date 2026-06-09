@@ -57,11 +57,7 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-// 將 A* 輸出的 pathNodes 疊回預覽圖。
-// 路線用鮮紅 #FF3B30，與可走區的青藍 (0,200,255) 強對比；外加白色外框，在深淺背景上都醒目。
-// 畫在可走區「上方」（正常 source-over，不用 destination-over）→ 不被半透明青藍蓋住而暗淡。
-// 線寬隨 canvas 解析度自適應：canvas 內部解析度 = 圖原始尺寸（可能很大），但 CSS 縮放顯示，
-// 若用固定 px，大圖在畫面上會變極細。改用「長邊的比例」+ 下限，確保各種尺寸畫面上都一致夠粗。
+// 把 A* 路徑疊回預覽圖：鮮紅主線 + 白外框，線寬隨長邊比例自適應（大圖才不會變極細）。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
@@ -185,8 +181,7 @@ const runFloodFill = () => {
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
     const denoiseArea = mapStore.denoiseMinArea * up * up
-    // smooth* 參數隨上採樣比例縮放：closing kernel 維持奇數（保 dilate/erode 對稱），
-    // 牆塊面積閾值以 up² 倍率擴張（與 denoiseArea 同一個邏輯）。
+    // smooth* 參數隨上採樣比例縮放（closing kernel 維持奇數、牆塊面積以 up² 擴張）。
     const smoothClose = (() => {
       const v = Math.round(p.smoothClosingSize * up)
       return v <= 1 ? 0 : v % 2 === 0 ? v + 1 : v

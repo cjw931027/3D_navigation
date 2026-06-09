@@ -1,12 +1,5 @@
-// contourUtils.ts — 穩健的輪廓抽取、DP 簡化、內偏、scanline 柵格化。
-// 純函式、不依賴 three.js / vue，可在 Node 環境直接測試。
-//
-// 核心改進（對比舊 extractRings）：
-//   舊版用 Map<number,number>（一個頂點最多一條 outgoing edge）串環 →
-//   多邊匯集頂點會覆蓋前寫 → 複雜斜線區環串斷。
-//
-//   新版用 marching squares 逐 cell 邊界產生有向邊 → 以「每條邊兩端點」
-//   建鄰接（允許一個頂點多條邊）→ 用「進邊方向 + 最右轉」規則串出封閉環。
+// contourUtils.ts — 輪廓抽取、DP 簡化、內偏、scanline 柵格化。純函式、可在 Node 測試。
+// marching squares 產生有向邊 → 鄰接表（允許頂點多條邊）→「進邊方向 + 最右轉」串封閉環。
 
 export type Pt = [number, number]
 export type Ring = Pt[]
@@ -14,9 +7,7 @@ export type Ring = Pt[]
 // ─────────────────────────────────────────────────
 // 1. Marching-squares 邊界邊抽取
 // ─────────────────────────────────────────────────
-// 掃描每個 cell，看它的 4 邊是否與不同類型（可走 vs 牆/界外）相鄰。
-// 產生有向邊：方向保證「可走在邊的左側」。
-// 輸出邊用 lattice 頂點座標（整數）。
+// 掃描每個 cell 的 4 邊，與不同類型相鄰處產生有向邊（方向保證「可走在邊左側」、lattice 整數座標）。
 
 export interface DirectedEdge {
   from: Pt
@@ -78,9 +69,7 @@ function buildAdjacency(edges: DirectedEdge[]): Map<string, AdjEntry[]> {
 // ─────────────────────────────────────────────────
 // 3. 用「進邊方向 + 最右轉」規則串封閉環
 // ─────────────────────────────────────────────────
-// 每條有向邊只用一次。到達頂點時，從所有 outgoing 邊中選「相對於進邊方向、
-// 最右轉（= 順時針轉角最小 = atan2 角度差最大取 clockwise-first）」的邊繼續。
-// 這在 y-down 座標下能正確分離外環與內環（牆塊洞）。
+// 每條有向邊只用一次；到頂點時選「相對進邊方向最右轉」的邊繼續，正確分離外環與內環。
 
 export function traceRings(edges: DirectedEdge[]): Ring[] {
   const adj = buildAdjacency(edges)
@@ -109,12 +98,8 @@ export function traceRings(edges: DirectedEdge[]): Ring[] {
       const inDx = curTo[0] - curEdge.from[0]
       const inDy = curTo[1] - curEdge.from[1]
 
-      // 轉向規則（軸對齊；可走永遠在邊左側）：在多邊匯集 / 對角 saddle 頂點，挑「保持可走在左的最銳轉彎」。
-      // 改用 cross/dot 分類，取代 atan2：atan2 在階梯對角 saddle 會把單一可走區誤拆成雜散小環。
-      //   cross = din × dout、dot = din · dout
-      //   優先序：region-preserving 轉彎(cross<0) > 直行(cross=0,dot>0) > 反向轉彎(cross>0) > 回頭(dot<0)
-      // 例：din=R 必挑 U（cross=-1）、din=L 必挑 D（cross=-1）→ checkerboard 對角自動 pinch 成兩獨立環，
-      // 而連續斜階梯則維持單一環不被拆碎。
+      // 轉向規則：用 cross/dot 分類挑「保持可走在左的最銳轉彎」（取代 atan2，避免對角 saddle 誤拆環）。
+      // 優先序：region-preserving 轉彎(cross<0) > 直行 > 反向轉彎 > 回頭。
       let bestIdx = -1
       let bestScore = 99
 
@@ -263,8 +248,7 @@ export function simplifyRing(ring: Ring, eps: number): Ring {
   const n = ring.length
   if (n <= 3) return ring.slice()
 
-  // 對封閉環：找距頂點 0 最遠的頂點作為第二個錨點，把環切成兩半各跑 DP 再合併。
-  // 這避免了「首尾同點 → chord 長度 0 → 所有中間點被距離判定吃掉」的退化問題。
+  // 封閉環：取距頂點 0 最遠者為第二錨點，切兩半各跑 DP 再合併（避免首尾同點的退化）。
   const p0 = ring[0]!
   let maxD = -1
   let anchor = Math.floor(n / 2)
@@ -329,8 +313,7 @@ export function inwardBias(ring: Ring, bias: number): Ring {
 // ─────────────────────────────────────────────────
 // 7. Scanline polygon fill — 把簡化後的輪廓烤回網格
 // ─────────────────────────────────────────────────
-// 使用 even-odd rule：對每個掃描行收集所有邊交點，排序後奇偶配對填 1。
-// 外環填可走、hole 再挖掉（even-odd 自動處理）。
+// even-odd rule：每掃描行收集邊交點，排序後奇偶配對填 1（外環填可走、hole 自動挖掉）。
 
 export function scanlineFill(
   allRings: Ring[],
