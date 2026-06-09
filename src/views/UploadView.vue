@@ -17,7 +17,8 @@ const selectionStep = ref<number>(0)
 const selectedFileName = ref('')
 const isDraggingFile = ref(false)
 
-const seedPoint = ref<{ x: number; y: number } | null>(null)
+// 多種子：步驟 1 可連續點多個路色種子（多色底圖需點多種走廊色）。
+const seedPoints = ref<{ x: number; y: number }[]>([])
 const startPoint = ref<{ x: number; y: number } | null>(null)
 const endPoint = ref<{ x: number; y: number } | null>(null)
 
@@ -41,7 +42,7 @@ let touchStartY = 0
 let didPinch = false
 
 const stepMessages: Record<number, string> = {
-  1: '步驟 1／3　點擊任意可行走區域（走廊任意位置）',
+  1: '步驟 1／3　點擊走廊路面（可點多個不同顏色的走廊，點完按「下一步」）',
   2: '步驟 2／3　點擊起點',
   3: '步驟 3／3　點擊終點',
   4: '標記完成',
@@ -252,14 +253,13 @@ onMounted(async () => {
     )
     originalImageData.value = restored
 
-    if (mapStore.seedPoint) seedPoint.value = { ...mapStore.seedPoint }
+    seedPoints.value = mapStore.seedPoints.map((s) => ({ ...s }))
     if (mapStore.startPoint) startPoint.value = { ...mapStore.startPoint }
     if (mapStore.endPoint) endPoint.value = { ...mapStore.endPoint }
 
     if (startPoint.value && endPoint.value) selectionStep.value = 4
     else if (startPoint.value) selectionStep.value = 3
-    else if (seedPoint.value) selectionStep.value = 2
-    else selectionStep.value = 1
+    else selectionStep.value = 1 // 種子步驟可有 0+ 個，統一回到步驟 1（可續點或按下一步）
 
     redrawCanvas(ctx)
     statusMessage.value = `${canvas.width} × ${canvas.height}`
@@ -378,11 +378,11 @@ const handleCanvasClick = (event: MouseEvent) => {
 // ── 標記點 ────────────────────────────────────────────────
 
 function commitPoint(x: number, y: number, ctx: CanvasRenderingContext2D) {
-  // 標記順序固定為種子點 → 起點 → 終點，種子點供 core.cpp 採樣路色。
+  // 標記順序：種子點(可多個) → 起點 → 終點，種子點供 core.cpp 採樣路色。
   if (selectionStep.value === 1) {
-    seedPoint.value = { x, y }
-    mapStore.setSeedPoint(seedPoint.value)
-    selectionStep.value = 2
+    // 多種子：每點一下新增一個，停在步驟 1 等使用者按「下一步」。
+    seedPoints.value = [...seedPoints.value, { x, y }]
+    mapStore.addSeedPoint({ x, y })
   } else if (selectionStep.value === 2) {
     startPoint.value = { x, y }
     selectionStep.value = 3
@@ -392,6 +392,24 @@ function commitPoint(x: number, y: number, ctx: CanvasRenderingContext2D) {
     selectionStep.value = 4
   }
   redrawCanvas(ctx)
+}
+
+// 種子標記完成 → 進入起點標記。
+function finishSeeds() {
+  if (!seedPoints.value.length) return
+  selectionStep.value = 2
+}
+
+// 復原最後一個種子。
+function undoLastSeed() {
+  if (!seedPoints.value.length) return
+  mapStore.removeSeedPoint(seedPoints.value.length - 1)
+  seedPoints.value = seedPoints.value.slice(0, -1)
+  const canvas = mapCanvas.value
+  if (canvas) {
+    const ctx = canvas.getContext('2d')
+    if (ctx) redrawCanvas(ctx)
+  }
 }
 
 // ── 繪製 Canvas ───────────────────────────────────────────
@@ -422,7 +440,9 @@ function redrawCanvas(ctx: CanvasRenderingContext2D) {
     ctx.fillText(label, point.x + 11, point.y - 5)
   }
 
-  if (seedPoint.value) drawDot(seedPoint.value, '#2196F3', '種子')
+  seedPoints.value.forEach((s, i) =>
+    drawDot(s, '#2196F3', seedPoints.value.length > 1 ? `種子${i + 1}` : '種子'),
+  )
   if (startPoint.value) drawDot(startPoint.value, '#4CAF50', '起點')
   if (endPoint.value) drawDot(endPoint.value, '#F44336', '終點')
 }
@@ -430,12 +450,12 @@ function redrawCanvas(ctx: CanvasRenderingContext2D) {
 // ── 重設 ──────────────────────────────────────────────────
 
 function resetAll() {
-  seedPoint.value = null
+  seedPoints.value = []
   startPoint.value = null
   endPoint.value = null
   if (selectionStep.value === 0) return
   selectionStep.value = 1
-  mapStore.setSeedPoint(null)
+  mapStore.clearSeedPoints()
   mapStore.setPoints(null, null)
   const canvas = mapCanvas.value
   if (canvas && originalImageData.value) {
@@ -486,23 +506,32 @@ const goToProcess = () => router.push('/path')
     <div class="action-bar" v-if="selectionStep > 0">
       <span class="step-msg">{{ stepMessages[selectionStep] }}</span>
       <div class="btn-group">
+        <button
+          v-if="selectionStep === 1"
+          class="btn-sm btn-sm--primary"
+          :disabled="!seedPoints.length"
+          @click="finishSeeds"
+        >
+          下一步：標記起點（已點 {{ seedPoints.length }} 個）
+        </button>
+        <button
+          v-if="selectionStep === 1 && seedPoints.length"
+          class="btn-sm"
+          @click="undoLastSeed"
+        >
+          復原種子
+        </button>
         <button v-if="selectionStep > 2" class="btn-sm" @click="resetStartEnd">重設起訖點</button>
         <button v-if="selectionStep > 1" class="btn-sm" @click="resetAll">全部重設</button>
         <button v-if="scale > 1.05" class="btn-sm" @click="resetZoom">重置縮放</button>
       </div>
     </div>
 
-    <!-- 路色預覽 -->
-    <div class="color-row" v-if="mapStore.pathColor">
-      <div class="color-chip">
-        <span
-          class="swatch"
-          :style="{
-            background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
-          }"
-        ></span>
-        路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
-        {{ mapStore.pathColor.b }})
+    <!-- 路色預覽（多種子）-->
+    <div class="color-row" v-if="mapStore.pathColors.length">
+      <div class="color-chip" v-for="(c, i) in mapStore.pathColors" :key="i">
+        <span class="swatch" :style="{ background: `rgb(${c.r},${c.g},${c.b})` }"></span>
+        rgb({{ c.r }}, {{ c.g }}, {{ c.b }})
       </div>
     </div>
     <div
@@ -675,9 +704,25 @@ h2 {
   background: var(--color-bg-hover);
 }
 
-/* 路色預覽 */
+/* 種子標記完成的主要按鈕：較醒目，引導使用者前進 */
+.btn-sm--primary {
+  background: var(--gradient-primary);
+  color: var(--color-white);
+  border-color: transparent;
+}
+.btn-sm--primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+.btn-sm--primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 路色預覽（多種子→多 chip，需換行置中）*/
 .color-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
   justify-content: center;
   margin-bottom: var(--space-3);
 }

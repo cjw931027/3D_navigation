@@ -1,4 +1,5 @@
 #include <emscripten/bind.h>
+#include <emscripten/val.h>
 #include <cstdlib>
 #include <vector>
 #include <cmath>
@@ -20,16 +21,7 @@ static int                   g_maskHeight = 0;
 // 路徑以 x0,y0,x1,y1,... 交錯存放，JS 以 Int32Array 讀取。
 static std::vector<int32_t>  g_pathBuffer;
 
-// 邊緣平滑 opening（erode→帶屏障 dilate）的 kernel 大小。預設 0 = 關閉。
-//
-// 為何關閉：此 opening 原為「3D 牆面斜邊鋸齒」而加（見 645bfce），但當時 3D 還用 greedy
-// meshing 直接吃原始 mask，需要先把 mask 磨平。現在 3D 改由 SceneView 的輪廓抽取 +
-// Douglas-Peucker 簡化（脫離網格）處理鋸齒，這層 mask 平滑對 3D 已多餘，只剩美化 2D 預覽。
-//
-// 而它有嚴重副作用：erode 會把「1~2px 寬的窄通道」整條吃掉，後續帶屏障 dilate 又因兩側是
-// 牆（wallMask 屏障）而回填不過去 → 窄通道（窄門、柵欄開口）被永久侵蝕、A* 繞路、3D 變牆。
-// 代價（吃窄通道）遠大於好處（只剩美化 2D 預覽），故預設關閉。
-// 保留函式與此變數：將來若 2D 預覽鋸齒需處理，改回 >1（奇數）即可重新啟用。
+// 邊緣平滑 opening 的 kernel 大小。預設 0=關閉（會永久吃掉窄通道，副作用大於好處）。
 static int gEdgeSmoothKernelSize = 0;
 
 int allocateMemory(int size) {
@@ -109,15 +101,13 @@ std::vector<RGB> sampleDominantColors(int cx, int cy, int width, int height,
     return result;
 }
 
-// 將最後兩個變數固定，quantShift是把相近的顏色歸類成同一類，設定為3代表使用位元運算(較快)，會同時同除8再乘8
-// topK是指選擇最前面幾個點當作種子點，設定為1就是第一多的當種子點
+// sampleDominantColors 的單色版（quantShift=3 量化、topK=1 取最主要色）。
 RGB sampleDominantColor(int cx, int cy, int width, int height, int radius) {
     auto colors = sampleDominantColors(cx, cy, width, height, radius, 3, 1);
     return colors[0];
 }
 
-// 斷點填補功能，對每個kSize的正方形，如果正方形中有1代表可以走，那就將所有正方形的值設為可以走
-// 因為是要偵測牆壁周圍有沒有可行走區域，所以會比較多牆壁，使用if先判斷可以減少時間
+// 膨脹：kSize 視窗內只要有一格可走就把整窗設為可走，用於補斷點。
 void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;
@@ -132,8 +122,7 @@ void dilate(std::vector<uint8_t>& mask, int width, int height, int kSize) {
 }
 
 
-// 將斷點填補的點填回去，以及牆壁加厚
-// 因為是在牆壁附近判斷kSize周圍有沒有牆壁，很容易就有牆壁，所以判斷如果有牆壁就停止迴圈，也是會減少時間
+// 侵蝕：kSize 視窗內全為可走才保留，用於削毛邊 / 牆壁加厚。
 void erode(std::vector<uint8_t>& mask, int width, int height, int kSize) {
     if (kSize <= 1) return;
     std::vector<uint8_t> result = mask;
@@ -171,23 +160,9 @@ void dilateWithBarrier(std::vector<uint8_t>& mask, const std::vector<uint8_t>& w
 }
 
 // === buildWallMask 可調門檻 ===
-// 演算法：對深色像素的 8 連通域，計算 maxSpan、包圍盒面積、填充率，
-// 任一條件滿足即視為牆：
-//   (A) maxSpan >= 外部傳入 spanThreshold        ── 長條牆（直接判定）
-//   (B) bboxArea >= WALL_MIN_BBOX_AREA AND
-//       minSpan >= WALL_MIN_BBOX_MIN_SPAN AND
-//       fillRatio <= WALL_MAX_FILL_RATIO          ── 空心框（小房間框線）
-//   (C) bboxArea >= WALL_MIN_BBOX_AREA AND
-//       perimeterCoverage >= WALL_MIN_PERIM_COVERAGE
-//                                                 ── 框線+內部文字相連時，
-//                                                    用「邊緣覆蓋率」補救判別
-// fillRatio = 連通域像素數 / 包圍盒面積。文字筆劃密度高 (>0.35)，
-// 牆框只佔包圍盒邊緣，密度低 (<0.25)。
-// perimeterCoverage = 連通域中位於包圍盒邊緣 PERIM_BAND_THICK 厚度內、
-// 且該行/列實際有像素的比例。空心框沿著四邊有像素，覆蓋率高 (>0.6)；
-// 即使框內文字把整體 fillRatio 拉高，框線本身仍會把四邊填滿。
-//
-// 各門檻設成具名常數，方便依現場資料微調：
+// 深色像素 8 連通域依四規則判牆：(A) maxSpan≥spanThreshold 長牆；(B) 大包圍盒+短邊夠寬+低填充率
+// 空心框；(C) 大包圍盒+高邊緣覆蓋率 框線被文字污染補救；(D) 細長直線碎片。
+// fillRatio=像素/包圍盒面積（文字密、牆框稀疏）。各門檻為具名常數，可微調。
 static constexpr int   WALL_MIN_BBOX_AREA       = 1500; // 包圍盒面積下限：低於此值多半是單一文字
 static constexpr int   WALL_MIN_BBOX_MIN_SPAN   = 25;   // 包圍盒短邊下限：太細長的物件不視為框
 static constexpr float WALL_MAX_FILL_RATIO      = 0.25f;// 純框線的填充率上限
@@ -195,24 +170,19 @@ static constexpr int   PERIM_BAND_THICK         = 2;    // 視為「邊緣」的
 static constexpr float WALL_MIN_PERIM_COVERAGE  = 0.60f;// 邊緣覆蓋率下限：框線即使被文字「污染」也應接近 1.0
 static constexpr float WALL_RULE_C_MAX_FILL     = 0.55f;// 規則 C 額外限制：避免 B/口/田 等粗體字（邊緣覆蓋率也高）誤判
 static constexpr int   WALL_DARK_CHROMA_MAX     = 30;   // 彩度上限：超過視為彩色（紅箭頭等），不視為深色
-// 規則 D：直線型「牆碎片」── 小房間的框線常被切成多段獨立直線
-// 偵測：短邊極細（≤ LINE_MAX_MIN_SPAN）且長邊夠長（≥ LINE_MIN_MAX_SPAN）
-// 文字筆劃即便細也不會出現「長度遠大於寬度」的長條形 bbox
+// 規則 D：直線碎片（短邊極細 + 長邊夠長），補抓被切成多段的框線。
 static constexpr int   LINE_MAX_MIN_SPAN        = 3;    // 直線碎片：短邊最多幾像素
 static constexpr int   LINE_MIN_MAX_SPAN        = 20;   // 直線碎片：長邊最少幾像素
 
+// === 字塊護欄：方塊狀 + 中等大小 + 筆劃密的深色連通域視為文字，略過所有牆規則 ===
+// 解粗體大字（如三樓「病床電梯廳/訪客電梯廳」）被誤判成牆。
+static constexpr int   GLYPH_MIN_SIDE           = 12;    // 字有厚度；牆線細(minSpan 小)→不算字
+static constexpr int   GLYPH_MAX_SPAN           = 80;    // 字頂多數十px；真牆長邊遠大於此→不算字
+static constexpr float GLYPH_MIN_FILL           = 0.30f; // 字筆劃密(≥0.3)；空心框/牆線稀疏(<0.25)→不算字
+
 // === 淺灰「線狀」框線補抓 ===
-// 有些平面圖的最外圈邊界線畫得很淡（例如 hospital.jpg 外框 brightness≈213），
-// 超過 DARK_THRESHOLD(170) → 連 isDark 都進不了 → 四規則完全輪不到它判，
-// 結果整圈外框沒被當牆，A* 會把路徑導向院區外那一圈（實際無路可走）。
-//
-// 不能只調高 DARK_THRESHOLD：那會讓大片淡灰底色（如某些圖的房間填色）整片被誤收成牆。
-// 關鍵差異不在亮度而在「形狀」── 外框是細長連續的「線」，淡灰填色是「面」。
-//
-// 解法：對「淺灰候選層」(brightness ∈ [DARK_THRESHOLD, FAINT_DARK_THRESHOLD)、仍低彩度)
-// 獨立做 8 連通域，只有「細長線狀」(minSpan ≤ FAINT_LINE_MAX_MIN_SPAN AND
-// maxSpan ≥ FAINT_LINE_MIN_MAX_SPAN) 的連通域才併入 isDark；大色塊（面）被擋掉。
-// 併入後一切照舊跑主連通域 + A/B/C/D 規則（淡灰外框多以規則 A/D 命中）。
+// 有些圖最外框畫得很淡（如 hospital 外框 ~213）超過 DARK_THRESHOLD 而漏判。對淺灰候選層
+// (brightness ∈ [DARK_THRESHOLD, FAINT_DARK_THRESHOLD)) 只併入「細長線狀」連通域，避免大色塊誤收。
 static constexpr uint8_t FAINT_DARK_THRESHOLD   = 225;  // 淺灰層亮度上限（介於核心牆 170 與白底 ~254 之間）
 static constexpr int   FAINT_LINE_MAX_MIN_SPAN  = 4;    // 淺灰線狀：短邊最多幾像素（夠細才算線）
 static constexpr int   FAINT_LINE_MIN_MAX_SPAN  = 40;   // 淺灰線狀：長邊最少幾像素（夠長才算框線，非雜點）
@@ -257,9 +227,7 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
     std::vector<int> queue;
     queue.reserve(512);
 
-    // === 淺灰線狀框線補抓（見上方常數註解）===
-    // 對「淺灰候選層」獨立連通，只把細長線狀者併入 isDark（大色塊不收）。
-    // 淺灰層定義：darkThreshold ≤ brightness < FAINT_DARK_THRESHOLD，且仍低彩度。
+    // 淺灰線狀框線補抓：淺灰候選層獨立連通，只把細長線狀者併入 isDark（大色塊不收）。
     {
         std::vector<bool> isFaint(total, false);
         for (int i = 0; i < total; i++) {
@@ -350,9 +318,7 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
         int pixels = (int)queue.size();
         float fillRatio = (float)pixels / (float)std::max(1, bboxArea);
 
-        // 計算「邊緣覆蓋率」：bbox 四邊各取 PERIM_BAND_THICK 厚度，
-        // 看每一行/列在邊緣帶內是否至少有 1 個連通域像素。
-        // 框線即便連到內部文字，四邊邊緣行/列仍會被框線佔滿。
+        // 邊緣覆蓋率：bbox 四邊邊緣帶內每行/列是否有像素的比例（框線即使連到文字，四邊仍滿）。
         float perimCoverage = 0.0f;
         if (bboxArea >= WALL_MIN_BBOX_AREA) {
             // 在 bbox 內建一張小型 occupancy map
@@ -384,9 +350,16 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
             perimCoverage = sample > 0 ? (float)hit / (float)sample : 0.0f;
         }
 
+        // 字塊護欄：方塊狀 + 中等大小 + 筆劃密 → 視為文字，不進任何牆規則。
+        bool isGlyph = minSpan >= GLYPH_MIN_SIDE
+                    && maxSpan <  GLYPH_MAX_SPAN
+                    && fillRatio >= GLYPH_MIN_FILL;
+
         int ruleHit = 0;
         bool isWall = false;
-        if (maxSpan >= spanThreshold) {
+        if (isGlyph) {
+            // 文字：略過所有牆規則
+        } else if (maxSpan >= spanThreshold) {
             isWall = true; ruleHit = 1;                      // (A) 長牆
         } else if (bboxArea >= WALL_MIN_BBOX_AREA
                 && minSpan   >= WALL_MIN_BBOX_MIN_SPAN
@@ -508,8 +481,7 @@ std::vector<uint8_t> buildPassableMaskRGB(int width, int height,
     return mask;
 }
 
-// 對 passableMask 做 closing（dilate→erode）填補走廊內被誤判為牆的小洞（小字、圖示等）。
-// dilate 階段一律不可覆蓋 wallMask 中的真牆；erode 階段純粹收縮可走區、不會吃到牆，無需 barrier。
+// closing（帶屏障 dilate→erode）填補走廊內小洞（小字/圖示），dilate 不覆蓋真牆。
 void closeSmallHolesWithBarrier(std::vector<uint8_t>& mask,
                                  const std::vector<uint8_t>& wallMask,
                                  int width, int height, int kSize) {
@@ -518,10 +490,7 @@ void closeSmallHolesWithBarrier(std::vector<uint8_t>& mask,
     erode(mask, width, height, kSize);
 }
 
-// 對 passableMask 做 opening（erode→dilate）平滑邊緣鋸齒。
-// erode 階段把 1~2 px 的邊緣突起磨掉；dilate 階段把整體形狀還原回原本範圍。
-// dilate 必須走 dilateWithBarrier，不可越過 wallMask（真牆絕對不能被覆蓋）。
-// kSize 寧小勿大：太大會吃掉窄門與細牆。
+// opening（erode→帶屏障 dilate）平滑邊緣鋸齒；dilate 不越過真牆。kSize 寧小勿大，否則吃窄門。
 void openWithBarrier(std::vector<uint8_t>& mask,
                      const std::vector<uint8_t>& wallMask,
                      int width, int height, int kSize) {
@@ -530,19 +499,11 @@ void openWithBarrier(std::vector<uint8_t>& mask,
     dilateWithBarrier(mask, wallMask, width, height, kSize);
 }
 
-// 邊界包圍門檻：不可走連通塊翻為可走前，要求其外圈鄰居中「可走(mask==1)」占比 ≥ 此值。
-// 用途：區分「走道內被可走包圍的洞」(該補，如樓梯/閘門/動線/文字標籤啃出的缺口)
-//       與「獨立的非路面島」(不該補，如戶外圖的草地/水池/設施塊 —— 它們周圍多是其他
-//       非路面或背景，邊界可走占比低，被此門檻擋掉)。
+// 邊界包圍門檻：洞翻為可走前，要求外圈鄰居「可走」占比 ≥ 此值（只補被可走包圍的洞，不補獨立非路面島）。
 static constexpr float FILL_HOLE_MIN_PASSABLE_BORDER = 0.70f;
 
-// 清除「牆」這邊面積小於 minArea 的孤立連通域：走廊裡偶有的小黑點 / 邊緣鋸齒突起、
-// 以及走道內非真牆的障礙(樓梯斜紋 / 閘門框 / 動線 / 文字圖示)啃出的缺口，會被翻為可走。
-// 三道閘同時成立才翻，確保安全：
-//   (a) 連通域面積 < minArea；
-//   (b) 不接觸 wallMask 真牆(整塊保留 → 數學上不可能穿牆)；
-//   (c) 外圈邊界鄰接可走的占比 ≥ FILL_HOLE_MIN_PASSABLE_BORDER(只補「被可走包圍的洞」，
-//       不補獨立非路面島)。
+// 把走道內的小障礙洞翻為可走。三條件同時成立才翻：(a) 面積 < minArea；
+// (b) 不接觸真牆（保證不穿牆）；(c) 邊界可走占比 ≥ FILL_HOLE_MIN_PASSABLE_BORDER。
 void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
                                           const std::vector<uint8_t>& wallMask,
                                           int width, int height, int minArea) {
@@ -583,9 +544,7 @@ void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
                     visited[ni] = true;
                     queue.push_back(ni);
                 }
-                // 鄰居是不可走且「已訪」：可能是同塊內部(不計)，也可能是相鄰的另一塊
-                // 真牆/別的洞。為了讓「邊界可走占比」能反映被牆夾住的程度，把屬於
-                // wallMask 真牆的鄰居計入邊界分母(非可走邊界)，藉此壓低貼牆塊的比例。
+                // 已訪的真牆鄰居計入邊界分母（非可走邊界），壓低貼牆塊的可走占比。
                 else if (!wallMask.empty() && wallMask[ni] == 1) {
                     borderTotal++;
                 }
@@ -641,10 +600,81 @@ void removeSmallMaskComponents(std::vector<uint8_t>& mask,
     }
 }
 
-//   對深色像素做 8 連通域分析，包圍盒最大跨度 < spanThreshold 的視為文字排除，
-//   其餘（真牆壁）列入屏障，dilate 時不得越過。設為 0 等同舊行為（無屏障）。
+// 把可走限制在矩形內（rect 外 + inset 邊一律清為不可走）。
+static void clipMaskToRect(std::vector<uint8_t>& mask, int width, int height,
+                           int minX, int minY, int maxX, int maxY, int inset) {
+    for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+            if (x < minX + inset || x > maxX - inset || y < minY + inset || y > maxY - inset)
+                mask[y * width + x] = 0;
+}
+
+// 把灰色圖框沿矩形 4 邊畫成 thick 寬屏障（mask=0+wallMask=1），補掉偵測缺口、擋住漏出。
+// 須在連通分量限制之前呼叫，框外才會與種子斷開被丟棄。
+static void carveFrameWall(std::vector<uint8_t>& mask, std::vector<uint8_t>& wallMask,
+                           int width, int height,
+                           int minX, int minY, int maxX, int maxY, int thick) {
+    auto setBarrier = [&](int x, int y) {
+        if (x < 0 || x >= width || y < 0 || y >= height) return;
+        mask[y * width + x] = 0;
+        if (!wallMask.empty()) wallMask[y * width + x] = 1;
+    };
+    for (int t = 0; t < thick; t++) {
+        for (int x = minX; x <= maxX; x++) { setBarrier(x, minY + t); setBarrier(x, maxY - t); }
+        for (int y = minY; y <= maxY; y++) { setBarrier(minX + t, y); setBarrier(maxX - t, y); }
+    }
+}
+
+// 過度捕捉對策 A（clipMode=1）：裁到所有牆的包圍盒 + margin（建物密集的戶外圖，框外白底被裁掉）。
+static void clipToWallBBox(std::vector<uint8_t>& mask, const std::vector<uint8_t>& wallMask,
+                           int width, int height, float marginFrac) {
+    if (wallMask.empty()) return;
+    int minX = width, minY = height, maxX = -1, maxY = -1;
+    int total = width * height;
+    for (int i = 0; i < total; i++) {
+        if (!wallMask[i]) continue;
+        int x = i % width, y = i / width;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    if (maxX < 0) return;
+    int mx = (int)std::lround(width * marginFrac), my = (int)std::lround(height * marginFrac);
+    minX = std::max(0, minX - mx); minY = std::max(0, minY - my);
+    maxX = std::min(width - 1, maxX + mx); maxY = std::min(height - 1, maxY + my);
+    clipMaskToRect(mask, width, height, minX, minY, maxX, maxY, 0);
+}
+
+// 過度捕捉對策 B（clipMode=2）：偵測灰色圖框矩形（低彩度灰長連續線的最外緣），供 carveFrameWall 封牆。
+// 用於白路=白圖外、靠一圈灰外框分隔的院區圖（hospital）。
+static bool detectFrameBBox(const uint8_t* buf, int width, int height, float minRunFrac,
+                            int& oMinX, int& oMinY, int& oMaxX, int& oMaxY) {
+    auto isGray = [&](int i) {
+        int r = buf[i*4], g = buf[i*4+1], b = buf[i*4+2];
+        int br = (r + g + b) / 3, ch = std::max({r,g,b}) - std::min({r,g,b});
+        return br >= 150 && br <= 228 && ch < 28;
+    };
+    int needV = (int)(minRunFrac * height), needH = (int)(minRunFrac * width);
+    int minX = -1, maxX = -1, minY = -1, maxY = -1;
+    for (int x = 0; x < width; x++) {
+        int run = 0, best = 0;
+        for (int y = 0; y < height; y++) { if (isGray(y*width+x)) { run++; if (run>best) best=run; } else run=0; }
+        if (best >= needV) { if (minX < 0) minX = x; maxX = x; }
+    }
+    for (int y = 0; y < height; y++) {
+        int run = 0, best = 0;
+        for (int x = 0; x < width; x++) { if (isGray(y*width+x)) { run++; if (run>best) best=run; } else run=0; }
+        if (best >= needH) { if (minY < 0) minY = y; maxY = y; }
+    }
+    if (minX < 0 || minY < 0 || maxX <= minX || maxY <= minY) return false;
+    oMinX = minX; oMinY = minY; oMaxX = maxX; oMaxY = maxY;
+    return true;
+}
+
+// 多種子可通行辨識主流程。seedXs/seedYs 為 JS 陣列，各取主色 union 成 pathColors（多色底圖用）。
+// clipMode：0=不裁、1=裁到牆包圍盒、2=灰色圖框封牆（戶外圖排除圖外白底）。
 void intelligentFloodFill(int width, int height,
-                           int seedX, int seedY,
+                           emscripten::val seedXs,
+                           emscripten::val seedYs,
                            int pathColorTolerance,
                            int closingKernelSize,
                            int wallThicken,
@@ -652,64 +682,84 @@ void intelligentFloodFill(int width, int height,
                            int denoiseMinArea,
                            int spanThreshold,
                            int smoothClosingSize,
-                           int smoothMinWallArea) {
+                           int smoothMinWallArea,
+                           int clipMode) {
     if (mapBuffer == nullptr) return;
-    if (seedX < 0 || seedX >= width || seedY < 0 || seedY >= height) return;
 
-    // 以深色像素的 8 連通域跨度區分「文字」與「牆壁」，建立絕對屏障遮罩。
-    // darkThreshold = 170：放寬為「深色 + 中灰」皆視為候選；
-    // 許多平面圖的房間框線是淺灰（亮度 130~165），128 抓不到，
-    // 必須放寬到 170 才能涵蓋。低彩度限制 (chroma<30) 仍排除彩色填充與紅箭頭。
+    // 讀多種子座標（過濾出界者）。
+    unsigned n = seedXs["length"].as<unsigned>();
+    std::vector<int> sxs, sys;
+    for (unsigned i = 0; i < n; i++) {
+        int sx = seedXs[i].as<int>();
+        int sy = seedYs[i].as<int>();
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+        sxs.push_back(sx);
+        sys.push_back(sy);
+    }
+    if (sxs.empty()) return;
+
+    // 建立牆壁屏障遮罩。darkThreshold=170 涵蓋淺灰框線，低彩度限制仍排除彩色箭頭。
     const uint8_t DARK_THRESHOLD = 170;
     std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
 
-    std::vector<uint8_t> mask;
+    // 每個種子各取主色，union 成多路色（buildPassableMaskRGB 對任一路色 OR 比對）。
+    std::vector<RGB> pathColors;
+    for (size_t i = 0; i < sxs.size(); i++) {
+        auto cs = sampleDominantColors(sxs[i], sys[i], width, height, sampleRadius, 3, 1);
+        for (auto& c : cs) pathColors.push_back(c);
+    }
 
-    auto pathColors = sampleDominantColors(seedX, seedY, width, height,
-                                                sampleRadius, 3, 1);
-        int tolSq = pathColorTolerance * pathColorTolerance;
-        mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
-                                     closingKernelSize, wallThicken, wallMask);
+    int tolSq = pathColorTolerance * pathColorTolerance;
+    std::vector<uint8_t> mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
+                                 closingKernelSize, wallThicken, wallMask);
 
-    // 邊緣平滑（opening: erode→帶屏障 dilate）。預設關閉（gEdgeSmoothKernelSize=0 → no-op）。
-    // 3D 鋸齒已改由 SceneView 輪廓簡化處理，此層對 3D 多餘；且 erode 會吃掉窄通道、屏障 dilate
-    // 又救不回，導致窄門/柵欄開口不可走。詳見 gEdgeSmoothKernelSize 宣告處的說明。
+    // 邊緣平滑（opening）。預設關閉（gEdgeSmoothKernelSize=0 → no-op）。詳見其宣告處說明。
     openWithBarrier(mask, wallMask, width, height, gEdgeSmoothKernelSize);
 
     if (denoiseMinArea > 0) {
         removeSmallMaskComponents(mask, width, height, denoiseMinArea);
     }
 
-    int searchR = 12 + wallThicken * 3;
-    int sx = seedX, sy = seedY;
-    if (!findNearestPassable(sx, sy, width, height, mask, searchR)) return;
+    // clipMode==2：先把灰色圖框「封成封閉牆」，必須在連通分量限制之前 →
+    // 框外白底會與種子斷開、在下面的 connected-component 被丟棄（解 hospital 漏到框外）。
+    int fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+    bool hasFrame = false;
+    if (clipMode == 2) {
+        hasFrame = detectFrameBBox(mapBuffer, width, height, 0.4f, fx0, fy0, fx1, fy1);
+        if (hasFrame)
+            carveFrameWall(mask, wallMask, width, height, fx0, fy0, fx1, fy1, 4);
+        else
+            clipToWallBBox(mask, wallMask, width, height, 0.04f); // 無框則退回牆包圍盒
+    }
 
-    // 先做 connected-component 限制:只保留種子點的連通分量
+    // connected-component 限制：從「所有種子」union BFS 染色（避免多色走廊只留其中一段）。
+    int searchR = 12 + wallThicken * 3;
     std::vector<uint8_t> seedMask(mask.size(), 0);
-    if (mask[sy * width + sx] == 1) {
-        std::vector<int> q;
-        q.push_back(sy * width + sx);
-        seedMask[sy * width + sx] = 1;
-        const int dx[] = {0,0,-1,1};
-        const int dy[] = {-1,1,0,0};
-        for (int h = 0; h < (int)q.size(); h++) {
-            int idx = q[h];
-            int cx = idx % width, cy = idx / width;
-            for (int d = 0; d < 4; d++) {
-                int nx = cx + dx[d], ny = cy + dy[d];
-                if (nx<0||nx>=width||ny<0||ny>=height) continue;
-                int ni = ny*width + nx;
-                if (seedMask[ni] == 0 && mask[ni] == 1) {
-                    seedMask[ni] = 1;
-                    q.push_back(ni);
-                }
+    std::vector<int> q;
+    const int dx[] = {0,0,-1,1};
+    const int dy[] = {-1,1,0,0};
+    for (size_t i = 0; i < sxs.size(); i++) {
+        int sx = sxs[i], sy = sys[i];
+        if (!findNearestPassable(sx, sy, width, height, mask, searchR)) continue;
+        int si = sy * width + sx;
+        if (mask[si] == 1 && seedMask[si] == 0) { seedMask[si] = 1; q.push_back(si); }
+    }
+    for (int h = 0; h < (int)q.size(); h++) {
+        int idx = q[h];
+        int cx = idx % width, cy = idx / width;
+        for (int d = 0; d < 4; d++) {
+            int nx = cx + dx[d], ny = cy + dy[d];
+            if (nx<0||nx>=width||ny<0||ny>=height) continue;
+            int ni = ny*width + nx;
+            if (seedMask[ni] == 0 && mask[ni] == 1) {
+                seedMask[ni] = 1;
+                q.push_back(ni);
             }
         }
     }
     mask = seedMask;
 
-    // 平滑階段：清理走廊內小黑點 / 邊緣鋸齒。所有「牆 → 可走」翻轉都受 wallMask 屏障保護，
-    // 確保 buildWallMask 認定的真牆壁不會被吃掉。順序：先 closing 補小洞 → 再清孤立小牆塊。
+    // 平滑階段：補小洞 → 清孤立小牆塊。所有「牆 → 可走」翻轉都受 wallMask 屏障保護。
     if (smoothClosingSize > 1) {
         closeSmallHolesWithBarrier(mask, wallMask, width, height, smoothClosingSize);
     }
@@ -717,7 +767,23 @@ void intelligentFloodFill(int width, int height,
         removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea);
     }
 
-    bfsFill(width, height, sx, sy, mask, true); // 渲染出可行走區域
+    // 過度捕捉對策後處理：clipMode==1 裁到牆包圍盒；clipMode==2 灰框已封牆，這裡保險裁掉框外殘留。
+    if (clipMode == 1) {
+        clipToWallBBox(mask, wallMask, width, height, 0.04f);
+    } else if (clipMode == 2 && hasFrame) {
+        clipMaskToRect(mask, width, height, fx0, fy0, fx1, fy1, 0);
+    }
+
+    // 染色：所有最終可走像素塗青藍（多種子可能含多個連通塊，全部上色）。
+    int total = width * height;
+    for (int i = 0; i < total; i++) {
+        if (mask[i]) {
+            mapBuffer[i*4]   = 0;
+            mapBuffer[i*4+1] = 200;
+            mapBuffer[i*4+2] = 255;
+        }
+    }
+
     g_passableMask = mask;
     g_maskWidth    = width;
     g_maskHeight   = height;

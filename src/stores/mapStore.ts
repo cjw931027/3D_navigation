@@ -92,11 +92,7 @@ function computeParams(mode: MapMode, sensitivity: number): FloodFillParams {
     wallThicken,
     sampleRadius: lerp(r.sampleRadius[0], r.sampleRadius[1], t),
     spanThreshold: lerp(r.spanThreshold[0], r.spanThreshold[1], t),
-    // 平滑參數獨立於靈敏度：closing 補小字洞、最小牆塊面積清掉孤立小黑點。
-    // smoothMinWallArea：把「面積 < 此值、不接觸真牆、且被可走區包圍」的不可走塊翻為可走。
-    // 用以補回走道內非真牆障礙(樓梯/閘門/動線/文字圖示)啃出的缺口；真牆與獨立非路面島
-    // (戶外草地等)受 wallMask 屏障與「邊界可走包圍」門檻保護不會被誤填。實測 ~600 足以
-    // 補平北車捷運通道的鋸齒缺口(飽和點約 800)。
+    // 平滑參數獨立於靈敏度：smoothMinWallArea 把「小面積、不接觸真牆、被可走包圍」的洞翻為可走。
     smoothClosingSize: 3,
     smoothMinWallArea: 600,
   }
@@ -332,8 +328,11 @@ export const useMapStore = defineStore('map', () => {
 
   const startPoint = ref<Point | null>(null)
   const endPoint = ref<Point | null>(null)
-  const seedPoint = ref<Point | null>(null)
-  const pathColor = ref<ColorRGB | null>(null)
+  // 多種子：使用者可點多個路色種子（多色底圖如三樓需點多種走廊色）。
+  const seedPoints = ref<Point[]>([])
+  const pathColors = ref<ColorRGB[]>([])
+  // 過度捕捉對策：0=不裁、1=裁到所有牆包圍盒(場地/戶外白底圖)、2=裁到灰色圖框內(hospital 院區外框)。
+  const clipMode = ref<0 | 1 | 2>(0)
 
   const mapMode = ref<MapMode>('indoor')
   const sensitivity = ref<number>(MODE_RANGE.indoor.defaultSensitivity)
@@ -424,9 +423,20 @@ export const useMapStore = defineStore('map', () => {
 
   function setFloodFillParams(params: Partial<FloodFillParams>) {
     floodFillParams.value = { ...floodFillParams.value, ...params }
-    if (params.sampleRadius !== undefined && seedPoint.value) {
-      pathColor.value = sampleDominantColor(seedPoint.value, floodFillParams.value.sampleRadius)
+    if (params.sampleRadius !== undefined && seedPoints.value.length) {
+      resampleAllColors()
     }
+  }
+
+  // 依目前 sampleRadius，對所有種子重新取主色，更新 pathColors。
+  function resampleAllColors() {
+    if (!imageRawData.value || mapWidth.value === 0) {
+      pathColors.value = []
+      return
+    }
+    pathColors.value = seedPoints.value.map((s) =>
+      sampleDominantColor(s, floodFillParams.value.sampleRadius),
+    )
   }
 
   async function initEngine() {
@@ -443,8 +453,9 @@ export const useMapStore = defineStore('map', () => {
     imageRawData.value = data
     mapWidth.value = width
     mapHeight.value = height
-    seedPoint.value = null
-    pathColor.value = null
+    seedPoints.value = []
+    pathColors.value = []
+    clipMode.value = 0
     startPoint.value = null
     endPoint.value = null
     pathNodes.value = []
@@ -461,13 +472,25 @@ export const useMapStore = defineStore('map', () => {
     applyComputed()
   }
 
-  function setSeedPoint(seed: Point | null) {
-    seedPoint.value = seed
-    if (seed && imageRawData.value && mapWidth.value > 0) {
-      pathColor.value = sampleDominantColor(seed, floodFillParams.value.sampleRadius)
-    } else {
-      pathColor.value = null
-    }
+  // 多種子：新增 / 移除 / 清空。每次變動都重新取所有種子的主色。
+  function addSeedPoint(seed: Point) {
+    seedPoints.value = [...seedPoints.value, seed]
+    resampleAllColors()
+  }
+
+  function removeSeedPoint(index: number) {
+    seedPoints.value = seedPoints.value.filter((_, i) => i !== index)
+    resampleAllColors()
+  }
+
+  function clearSeedPoints() {
+    seedPoints.value = []
+    pathColors.value = []
+  }
+
+  function setClipMode(m: 0 | 1 | 2) {
+    clipMode.value = m
+    clearDerivedResults()
   }
 
   function setPoints(start: Point | null, end: Point | null) {
@@ -590,8 +613,9 @@ export const useMapStore = defineStore('map', () => {
     mapHeight,
     startPoint,
     endPoint,
-    seedPoint,
-    pathColor,
+    seedPoints,
+    pathColors,
+    clipMode,
     mapMode,
     sensitivity,
     floodFillParams,
@@ -601,7 +625,10 @@ export const useMapStore = defineStore('map', () => {
     setFloodFillParams,
     setMapData,
     setPoints,
-    setSeedPoint,
+    addSeedPoint,
+    removeSeedPoint,
+    clearSeedPoints,
+    setClipMode,
     wasmModule,
     isEngineReady,
     initEngine,

@@ -57,11 +57,7 @@ const paramConfig: Record<string, { min: number; max: number; step: number }> = 
   sampleRadius: { min: 3, max: 18, step: 1 },
 }
 
-// 將 A* 輸出的 pathNodes 疊回預覽圖。
-// 路線用鮮紅 #FF3B30，與可走區的青藍 (0,200,255) 強對比；外加白色外框，在深淺背景上都醒目。
-// 畫在可走區「上方」（正常 source-over，不用 destination-over）→ 不被半透明青藍蓋住而暗淡。
-// 線寬隨 canvas 解析度自適應：canvas 內部解析度 = 圖原始尺寸（可能很大），但 CSS 縮放顯示，
-// 若用固定 px，大圖在畫面上會變極細。改用「長邊的比例」+ 下限，確保各種尺寸畫面上都一致夠粗。
+// 把 A* 路徑疊回預覽圖：鮮紅主線 + 白外框，線寬隨長邊比例自適應（大圖才不會變極細）。
 function drawPath(ctx: CanvasRenderingContext2D) {
   const nodes = mapStore.pathNodes
   if (nodes.length < 2) return
@@ -143,12 +139,11 @@ const runFloodFill = () => {
   if (!mapStore.wasmModule) return showToast('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
   if (!rawData || mapStore.mapWidth === 0) return showToast('尚未載入地圖')
-  if (!mapStore.seedPoint) return showToast('缺少種子點，請回上傳頁重新標記')
+  if (!mapStore.seedPoints.length) return showToast('缺少種子點，請回上傳頁重新標記')
 
   const width = mapStore.mapWidth
   const height = mapStore.mapHeight
   const p = mapStore.floodFillParams
-  const seed = mapStore.seedPoint
   const up = mapStore.upscaleFactor
 
   const W2 = width * up
@@ -186,18 +181,20 @@ const runFloodFill = () => {
     mapStore.wasmModule.HEAPU8.set(sendData, pointer)
 
     const denoiseArea = mapStore.denoiseMinArea * up * up
-    // smooth* 參數隨上採樣比例縮放：closing kernel 維持奇數（保 dilate/erode 對稱），
-    // 牆塊面積閾值以 up² 倍率擴張（與 denoiseArea 同一個邏輯）。
+    // smooth* 參數隨上採樣比例縮放（closing kernel 維持奇數、牆塊面積以 up² 擴張）。
     const smoothClose = (() => {
       const v = Math.round(p.smoothClosingSize * up)
       return v <= 1 ? 0 : v % 2 === 0 ? v + 1 : v
     })()
     const smoothMinWall = p.smoothMinWallArea * up * up
+    // 多種子：傳 seedXs / seedYs 陣列 + clipMode 給新版 WASM 介面。
+    const seedXs = mapStore.seedPoints.map((s) => Math.round(s.x * up))
+    const seedYs = mapStore.seedPoints.map((s) => Math.round(s.y * up))
     mapStore.wasmModule.intelligentFloodFill(
       W2,
       H2,
-      Math.round(seed.x * up),
-      Math.round(seed.y * up),
+      seedXs,
+      seedYs,
       p.pathColorTolerance,
       p.closingKernelSize,
       p.wallThicken,
@@ -206,6 +203,7 @@ const runFloodFill = () => {
       p.spanThreshold,
       smoothClose,
       smoothMinWall,
+      mapStore.clipMode,
     )
 
     // 放大尺寸結果取出後，最近鄰下採樣回原尺寸供顯示。
@@ -321,19 +319,29 @@ const runAStarOnly = () => {
 
     <template v-else>
       <div class="panel">
-        <!-- 路色預覽 -->
+        <!-- 路色預覽（多種子）-->
         <div class="color-row">
-          <div class="color-chip" v-if="mapStore.pathColor">
-            <span
-              class="swatch"
-              :style="{
-                background: `rgb(${mapStore.pathColor.r},${mapStore.pathColor.g},${mapStore.pathColor.b})`,
-              }"
-            ></span>
-            路色　rgb({{ mapStore.pathColor.r }}, {{ mapStore.pathColor.g }},
-            {{ mapStore.pathColor.b }})
-          </div>
+          <template v-if="mapStore.pathColors.length">
+            <div class="color-chip" v-for="(c, i) in mapStore.pathColors" :key="i">
+              <span class="swatch" :style="{ background: `rgb(${c.r},${c.g},${c.b})` }"></span>
+              rgb({{ c.r }}, {{ c.g }}, {{ c.b }})
+            </div>
+          </template>
           <div class="color-chip muted" v-else>路色未採樣</div>
+        </div>
+
+        <!-- 圖外白底處理（戶外圖用）：白路與圖外背景同色時，把圖外裁掉 -->
+        <div class="clip-row">
+          <span class="clip-label">圖外白底處理</span>
+          <select
+            class="clip-select"
+            :value="mapStore.clipMode"
+            @change="mapStore.setClipMode(Number(($event.target as HTMLSelectElement).value) as 0 | 1 | 2)"
+          >
+            <option :value="0">無（室內多色底圖）</option>
+            <option :value="1">牆包圍盒（建物密集的戶外圖）</option>
+            <option :value="2">灰色外框（院區圖有外框線）</option>
+          </select>
         </div>
 
         <!-- 靈敏度 -->
@@ -731,7 +739,33 @@ h1 {
 
 .color-row {
   display: flex;
-  margin-bottom: var(--space-6);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+/* 圖外白底處理選擇器 */
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+.clip-label {
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+  font-weight: var(--font-semibold);
+}
+.clip-select {
+  flex: 1;
+  min-height: 38px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-white);
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  cursor: pointer;
 }
 
 .color-chip {
