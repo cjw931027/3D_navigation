@@ -5,7 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
-import { extractAndRasterize, type Ring, type Pt } from '@/utils/contourUtils'
+import { extractAndRasterize, type Pt } from '@/utils/contourUtils'
 import {
   buildSegGrid,
   canStandAtPoly,
@@ -75,7 +75,7 @@ const LOOK_SENSITIVITY = 0.005
 const JOYSTICK_DEADZONE = 0.15
 // 觸控分區：畫面「下方」此比例為搖桿生效區，其餘上方為轉視角區（上下分區，不綁左右手）。
 // 0.30 = 下方 30%。比例相對 touch-layer（場景區）高度，非整個視窗。調大 = 搖桿區更寬。
-const JOYSTICK_ZONE_RATIO = 0.30
+const JOYSTICK_ZONE_RATIO = 0.3
 
 // 虛擬搖桿狀態（浮動式）。jx/jy∈[-1,1] 正規化偏移；active 是否按住；knobX/Y 純視覺位移；
 // baseX/Y 底座中心螢幕座標（active 時 = 手指按下處）。
@@ -86,9 +86,8 @@ const debugHeading = ref(0)
 // template 不可直接用 Math，這裡把 heading 轉成度數字串供 debug 疊層顯示。
 const debugHeadingDeg = computed(() => ((debugHeading.value * 180) / Math.PI).toFixed(0))
 
-// 搖桿底座半徑（CSS px）——視覺底座尺寸（直徑 = 2×此值），須與 style 的 .joystick-base 尺寸一致。
-const JOYSTICK_BASE_RADIUS = 60
-// 搖桿頭最大可離開中心的像素（略小於底座半徑，留邊）。pointermove 正規化以此為準。
+// 搖桿頭最大可離開中心的像素（略小於底座半徑 60px，留邊;底座直徑見 style 的 .joystick-base）。
+// pointermove 正規化以此為準。
 const JOYSTICK_KNOB_RANGE = 44
 
 // 多點觸控分流：分別記錄搖桿/轉視角手指的 pointerId（允許雙指同時，勿用單一全域狀態）。
@@ -105,7 +104,6 @@ let sceneHalfW = 0
 let sceneHalfH = 0
 let sceneUp = 1
 let sceneEyeHeight = 1.2
-let sceneWallHeight = 2
 // 碰撞遮罩（網格版）：USE_CONTOUR_WALLS=false 的 box fallback 仍用它；輪廓模式改用 collisionSegs。
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
@@ -208,7 +206,6 @@ function smoothIsolatedWalls(data: Uint8Array, w: number, h: number) {
     if (!changed) break
   }
 }
-
 
 // DP 簡化 pathNodes：中間節點到 chord 的垂距 < eps 且 chord 可通行就丟棄（清軸向抖動，真實轉角保留）。
 function dpSimplifyPath(
@@ -345,7 +342,6 @@ function buildGeometry() {
   sceneHalfW = halfW
   sceneHalfH = halfH
   sceneUp = mapStore.upscaleFactor || 1
-  sceneWallHeight = wallHeight
   sceneEyeHeight = wallHeight * 0.75
 
   // pxToColl 與 pxToDisplay 完全相同（兩者都是「原始 px 座標 → ds 網格座標」的係數）
@@ -367,44 +363,60 @@ function buildGeometry() {
   // 視覺幾何：輪廓抽取 → DP 簡化 → 內偏 → 烤回 smoothedMask → 牆面 + 地板。
   // 碰撞與視覺牆由同一組簡化輪廓衍生、形狀一致。USE_CONTOUR_WALLS=false 回退 box-per-cell（debug）。
   const USE_CONTOUR_WALLS = true
-  const DP_EPSILON_CELLS = 0.8   // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
+  const DP_EPSILON_CELLS = 0.8 // DP 簡化容差（cell 單位）；偏小保守，>1 會吃掉窄門
   const INWARD_BIAS_CELLS = 0.05 // 簡化後內偏量（cell 單位）；確保視覺可走 ⊆ 碰撞可走
 
-  const latticeToWorld = (p: Pt) => new THREE.Vector2(
-    p[0] * dispCell - halfW,
-    p[1] * dispCell - halfH,
-  )
+  const latticeToWorld = (p: Pt) =>
+    new THREE.Vector2(p[0] * dispCell - halfW, p[1] * dispCell - halfH)
 
   // ---- Fallback：保留 box-per-cell 路徑作為 USE_CONTOUR_WALLS=false 的 debug 開關 ----
   function buildBoxFallback() {
     collisionMask = data
     collisionSegs = null // box fallback 用網格碰撞
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf0f3f7, roughness: 0.6, metalness: 0.05 })
-    const floorMat = new THREE.MeshStandardMaterial({ color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: 0xf0f3f7,
+      roughness: 0.6,
+      metalness: 0.05,
+    })
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: 0x7fb8ff,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    })
     const wallParts: THREE.BufferGeometry[] = []
     const floorParts: THREE.BufferGeometry[] = []
-    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-      const cx = (x + 0.5) * dispCell - halfW
-      const cz = (y + 0.5) * dispCell - halfH
-      if (data[y * width + x] === 1) {
-        const g = new THREE.PlaneGeometry(dispCell, dispCell)
-        g.rotateX(-Math.PI / 2); g.translate(cx, 0, cz); floorParts.push(g)
-      } else {
-        const g = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
-        g.translate(cx, wallHeight / 2, cz); wallParts.push(g)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const cx = (x + 0.5) * dispCell - halfW
+        const cz = (y + 0.5) * dispCell - halfH
+        if (data[y * width + x] === 1) {
+          const g = new THREE.PlaneGeometry(dispCell, dispCell)
+          g.rotateX(-Math.PI / 2)
+          g.translate(cx, 0, cz)
+          floorParts.push(g)
+        } else {
+          const g = new THREE.BoxGeometry(dispCell, wallHeight, dispCell)
+          g.translate(cx, wallHeight / 2, cz)
+          wallParts.push(g)
+        }
       }
-    }
-    const fm = mergeGeometries(floorParts, false); floorParts.forEach(g => g.dispose())
-    const wm = mergeGeometries(wallParts, false);  wallParts.forEach(g => g.dispose())
+    const fm = mergeGeometries(floorParts, false)
+    floorParts.forEach((g) => g.dispose())
+    const wm = mergeGeometries(wallParts, false)
+    wallParts.forEach((g) => g.dispose())
     if (fm) mapGroup.add(new THREE.Mesh(fm, floorMat))
     if (wm) mapGroup.add(new THREE.Mesh(wm, wallMat))
   }
 
-  if (!USE_CONTOUR_WALLS) { buildBoxFallback(); return }
+  if (!USE_CONTOUR_WALLS) {
+    buildBoxFallback()
+    return
+  }
 
   // -- 抽輪廓 → 分類 → 簡化 → 內偏 → 烤回 smoothedMask（一次完成） --
   const contour = extractAndRasterize(data, width, height, DP_EPSILON_CELLS, INWARD_BIAS_CELLS)
-  const { simpOuters, simpHolesByOuter, allRings, smoothedMask, stats } = contour
+  const { simpOuters, simpHolesByOuter, allRings, smoothedMask } = contour
 
   // 碰撞改用輪廓線段（與視覺牆同一串環）：轉成線段 + 空間網格，碰撞邊界 = 視覺斜線、不穿牆。
   collisionSegs = buildSegGrid(ringsToSegments(allRings))
@@ -416,7 +428,10 @@ function buildGeometry() {
 
   // ---- 地板：每個可走元件 = 一個 Shape（outer=外環, holes=內牆塊環），平鋪在 y=0 ----
   const floorMat = new THREE.MeshStandardMaterial({
-    color: 0x7fb8ff, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
+    color: 0x7fb8ff,
+    roughness: 0.85,
+    metalness: 0.05,
+    side: THREE.DoubleSide,
   })
   const floorParts: THREE.BufferGeometry[] = []
   for (let i = 0; i < simpOuters.length; i++) {
@@ -424,7 +439,8 @@ function buildGeometry() {
     if (outer.length < 3) continue
     const shape = new THREE.Shape(outer.map(latticeToWorld))
     const holes = simpHolesByOuter.get(i) ?? []
-    for (const h of holes) if (h.length >= 3) shape.holes.push(new THREE.Path(h.map(latticeToWorld)))
+    for (const h of holes)
+      if (h.length >= 3) shape.holes.push(new THREE.Path(h.map(latticeToWorld)))
     const g = new THREE.ShapeGeometry(shape)
     // Shape 在 XY 平面、Y=0；rotateX(+π/2) 使 shape-y → world-z（不翻轉），與牆 quad 對齊。
     // 法線旋轉後朝 -Y，但 floorMat 是 DoubleSide，從上方仍可見。
@@ -432,24 +448,27 @@ function buildGeometry() {
     floorParts.push(g)
   }
   const floorMerged = mergeGeometries(floorParts, false)
-  floorParts.forEach(g => g.dispose())
+  floorParts.forEach((g) => g.dispose())
   if (floorMerged) mapGroup.add(new THREE.Mesh(floorMerged, floorMat))
 
   // ---- 牆：對每條 ring 的每條邊手動建垂直 quad（避開 ExtrudeGeometry 軸向陷阱） ----
   const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xf0f3f7, roughness: 0.6, metalness: 0.05,
+    color: 0xf0f3f7,
+    roughness: 0.6,
+    metalness: 0.05,
   })
 
   let edgeCount = 0
   for (const r of allRings) if (r.length >= 2) edgeCount += r.length
 
   let wallMerged: THREE.BufferGeometry | null = null
-  let wallQuads = 0
   if (edgeCount > 0) {
     const positions = new Float32Array(edgeCount * 6 * 3)
     let o = 0
     const pushV = (x: number, y: number, z: number) => {
-      positions[o++] = x; positions[o++] = y; positions[o++] = z
+      positions[o++] = x
+      positions[o++] = y
+      positions[o++] = z
     }
     for (const ring of allRings) {
       const n = ring.length
@@ -457,11 +476,16 @@ function buildGeometry() {
       for (let i = 0; i < n; i++) {
         const p1 = ring[i]!
         const p2 = ring[(i + 1) % n]!
-        const x1 = toWorldX(p1), z1 = toWorldZ(p1)
-        const x2 = toWorldX(p2), z2 = toWorldZ(p2)
-        pushV(x1, 0, z1); pushV(x2, wallHeight, z2); pushV(x2, 0, z2)
-        pushV(x1, 0, z1); pushV(x1, wallHeight, z1); pushV(x2, wallHeight, z2)
-        wallQuads++
+        const x1 = toWorldX(p1),
+          z1 = toWorldZ(p1)
+        const x2 = toWorldX(p2),
+          z2 = toWorldZ(p2)
+        pushV(x1, 0, z1)
+        pushV(x2, wallHeight, z2)
+        pushV(x2, 0, z2)
+        pushV(x1, 0, z1)
+        pushV(x1, wallHeight, z1)
+        pushV(x2, wallHeight, z2)
       }
     }
     wallMerged = new THREE.BufferGeometry()
@@ -469,45 +493,6 @@ function buildGeometry() {
     wallMerged.computeVertexNormals()
     mapGroup.add(new THREE.Mesh(wallMerged, wallMat))
   }
-
-  // 統計輸出（含 bounding box 自查 + smoothedMask 差異）
-  const triCount = (g: THREE.BufferGeometry | null) => {
-    if (!g) return 0
-    if (g.index) return g.index.count / 3
-    return (g.attributes.position?.count ?? 0) / 3
-  }
-  const bboxY = (g: THREE.BufferGeometry | null): [number, number] => {
-    if (!g) return [0, 0]
-    g.computeBoundingBox()
-    const b = g.boundingBox
-    return b ? [b.min.y, b.max.y] : [0, 0]
-  }
-  const wallTris = triCount(wallMerged)
-  const floorTris = triCount(floorMerged)
-  const [wMinY, wMaxY] = bboxY(wallMerged)
-  const [fMinY, fMaxY] = bboxY(floorMerged)
-  console.log(
-    '[SceneView] contour walls: %dx%d grid, rings raw=%d (outer=%d, holes=%d), verts %d → %d (%.1f%% after DP+bias)',
-    width, height,
-    stats.rawRingCount, stats.outerCount, stats.holeCount,
-    stats.rawVerts, stats.simpVerts,
-    stats.rawVerts > 0 ? (100 * stats.simpVerts) / stats.rawVerts : 0,
-  )
-  console.log(
-    '[SceneView] smoothedMask: passable cells %d → %d (diff %.2f%%)',
-    stats.originalPassable, stats.smoothedPassable, stats.diffPercent,
-  )
-  console.log(
-    '[SceneView] poly collision: %d segments; start point passable=%s',
-    collisionSegs ? collisionSegs.segs.length : 0,
-    mapStore.startPoint ? String(isPassableAtPixel(mapStore.startPoint.x, mapStore.startPoint.y)) : 'n/a',
-  )
-  console.log(
-    '[SceneView] geometry: wall quads=%d (tris=%d), floor tris=%d, wallHeight=%.3f | wall bbox.y=[%.3f, %.3f] (expect [0, %.3f]), floor bbox.y=[%.3f, %.3f] (expect ~0)',
-    wallQuads, wallTris, floorTris, wallHeight,
-    wMinY, wMaxY, wallHeight,
-    fMinY, fMaxY,
-  )
 }
 
 // 動態指引路徑：從 userPosition 在路徑上的最近投影點回傳「腳下到終點」的節點（沿路走會縮短）。
@@ -744,7 +729,9 @@ function snapToNearestPassable(px: number, py: number): { x: number; y: number }
     )
     return bestInside
   }
-  console.warn('[SceneView] snapToNearestPassable: 完全找不到可走 cell（smoothedMask 全牆？），回傳原點。')
+  console.warn(
+    '[SceneView] snapToNearestPassable: 完全找不到可走 cell（smoothedMask 全牆？），回傳原點。',
+  )
   return { x: px, y: py }
 }
 
@@ -923,15 +910,22 @@ function ensureMinimapBase() {
     return
   }
   // 已建且尺寸相符就沿用（floodFill 重跑時 buffer 參考會換，這裡用尺寸 + 旗標判斷簡單重建）。
-  if (minimapBaseTmp && minimapBaseTmp.canvas.width === w && minimapBaseTmp.canvas.height === h
-      && minimapBaseDirty === false) {
+  if (
+    minimapBaseTmp &&
+    minimapBaseTmp.canvas.width === w &&
+    minimapBaseTmp.canvas.height === h &&
+    minimapBaseDirty === false
+  ) {
     return
   }
   const canvas = minimapBaseTmp?.canvas ?? document.createElement('canvas')
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d')
-  if (!ctx) { minimapBaseTmp = null; return }
+  if (!ctx) {
+    minimapBaseTmp = null
+    return
+  }
   ctx.putImageData(new ImageData(new Uint8ClampedArray(buf), w, h), 0, 0)
   minimapBaseTmp = { canvas, ctx }
   minimapBaseDirty = false
@@ -968,7 +962,17 @@ function drawMinimap() {
   ctx.fillRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE)
   if (minimapBaseTmp) {
     ctx.imageSmoothingEnabled = false
-    ctx.drawImage(minimapBaseTmp.canvas, u.x - R, u.y - R, 2 * R, 2 * R, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE)
+    ctx.drawImage(
+      minimapBaseTmp.canvas,
+      u.x - R,
+      u.y - R,
+      2 * R,
+      2 * R,
+      0,
+      0,
+      MINIMAP_SIZE,
+      MINIMAP_SIZE,
+    )
   }
 
   // trimmed 路徑（鮮紅 + 白外框）
@@ -1081,23 +1085,6 @@ function enterFirstPerson() {
   lastPathBuildPos = null
   lastReplanTs = 0
   buildPath()
-  // === Bug1 診斷：起點 / 起點是否可走 / snap 結果 / snap 結果是否可走 ===
-  // 用來判別問題是「起點被判不可走」還是「snap 找錯點」。實測排查後可移除。
-  if (mapStore.startPoint) {
-    const sp = mapStore.startPoint
-    const startOk = isPassableAtPixel(sp.x, sp.y)
-    const startInside = isInsideWalkable(sp.x, sp.y)
-    const snapped = snapToNearestPassable(sp.x, sp.y)
-    const snapOk = isPassableAtPixel(snapped.x, snapped.y)
-    const snapInside = isInsideWalkable(snapped.x, snapped.y)
-    console.log(
-      '[SceneView][enterFP] startPoint=(%d,%d) passable=%s inside=%s | snap=(%.1f,%.1f) passable=%s inside=%s | userPos=(%.1f,%.1f) | mode=%s',
-      sp.x, sp.y, String(startOk), String(startInside),
-      snapped.x, snapped.y, String(snapOk), String(snapInside),
-      mapStore.userPosition?.x ?? NaN, mapStore.userPosition?.y ?? NaN,
-      collisionSegs ? 'poly' : 'grid',
-    )
-  }
   mapGroup.rotation.y = 0
   pathGroup.rotation.y = 0
   // 第一人稱由 updateCamera 直接控制相機，停用 OrbitControls 以免互搶。
@@ -1222,7 +1209,11 @@ function onTouchPointerDown(e: PointerEvent) {
   const layer = e.currentTarget as HTMLElement // = .touch-layer，用來算下方比例
   // setPointerCapture：綁定 pointer 到 touch-layer，手指滑出邊界仍持續收到事件、不卡住。
   const capture = () => {
-    try { layer.setPointerCapture(e.pointerId) } catch { /* 某些環境不支援，忽略 */ }
+    try {
+      layer.setPointerCapture(e.pointerId)
+    } catch {
+      /* 某些環境不支援，忽略 */
+    }
   }
   if (joystickPointerId === null && isInJoystickZone(e.clientY, layer)) {
     joystickCenterX = e.clientX
@@ -1444,11 +1435,15 @@ onBeforeUnmount(() => {
       <div
         class="joystick-base"
         :class="{ active: joystick.active }"
-        :style="joystick.active ? { left: `${joystick.baseX}px`, top: `${joystick.baseY}px` } : undefined"
+        :style="
+          joystick.active ? { left: `${joystick.baseX}px`, top: `${joystick.baseY}px` } : undefined
+        "
       >
         <div
           class="joystick-knob"
-          :style="{ transform: `translate(-50%, -50%) translate(${joystick.knobX}px, ${joystick.knobY}px)` }"
+          :style="{
+            transform: `translate(-50%, -50%) translate(${joystick.knobX}px, ${joystick.knobY}px)`,
+          }"
         />
       </div>
 
@@ -1462,17 +1457,17 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 殼層在 /scene 不顯示頂欄/側欄頂部空間,場景直接滿版(手機與桌面皆同)。 */
 .scene-view {
   position: relative;
   width: 100%;
-  height: calc(100vh - 100px);
+  height: 100dvh;
 }
 .scene-canvas {
   width: 100%;
   height: 100%;
-  border-radius: var(--radius-md);
   overflow: hidden;
-  background: var(--color-text);
+  background: #0d1620; /* 場景載入前的底色,固定深色不隨主題 */
 }
 .scene-canvas :deep(canvas) {
   display: block;
@@ -1486,8 +1481,11 @@ onBeforeUnmount(() => {
   transform: translateX(-50%);
   padding: var(--space-3) var(--space-4);
   background: var(--color-scene-panel);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
   color: var(--color-scene-text);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   font-size: var(--text-base);
   pointer-events: none;
 }
@@ -1512,9 +1510,11 @@ onBeforeUnmount(() => {
   width: 160px;
   height: 160px;
   border-radius: var(--radius-circle);
+  border: 2px solid var(--glass-border);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   pointer-events: none;
   background: var(--color-scene-panel);
+  box-sizing: border-box;
 }
 
 @media (max-width: 480px) {
@@ -1530,11 +1530,11 @@ onBeforeUnmount(() => {
   align-items: center;
   min-height: 40px;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
   background: var(--color-scene-panel);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
   color: var(--color-scene-text);
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
@@ -1549,7 +1549,7 @@ onBeforeUnmount(() => {
 }
 
 .scene-flow-btn:hover {
-  background: var(--gradient-primary);
+  background: var(--color-primary);
   color: var(--color-white);
   transform: translateY(-1px);
   box-shadow: var(--shadow-lg);
@@ -1560,8 +1560,11 @@ onBeforeUnmount(() => {
 
 .scene-flow-btn--primary {
   border-color: transparent;
-  background: var(--gradient-primary);
+  background: var(--color-primary);
   color: var(--color-white);
+}
+.scene-flow-btn--primary:hover {
+  background: var(--color-primary-hover);
 }
 
 .top-bar {
@@ -1574,11 +1577,11 @@ onBeforeUnmount(() => {
 }
 .mode-btn {
   padding: var(--space-2) var(--space-4);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
   background: var(--color-scene-panel);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
   color: var(--color-scene-text);
   cursor: pointer;
   font-size: var(--text-base);
@@ -1599,7 +1602,7 @@ onBeforeUnmount(() => {
 }
 .mode-btn.active {
   background: var(--color-scene-accent);
-  color: var(--color-text);
+  color: #0d1620; /* 青色底上固定用深字,不隨主題 */
   font-weight: var(--font-bold);
 }
 
@@ -1611,8 +1614,11 @@ onBeforeUnmount(() => {
   z-index: 5; /* 高於 .touch-layer(3)：偏離路徑的「重新規劃」鈕仍可點 */
   padding: var(--space-3) var(--space-4);
   background: var(--color-scene-warning);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
   color: var(--color-white);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   font-size: var(--text-base);
   display: flex;
   align-items: center;
@@ -1645,7 +1651,7 @@ onBeforeUnmount(() => {
   -webkit-user-select: none;
 }
 
-/* 浮動虛擬搖桿底座（直徑須與 script 的 JOYSTICK_BASE_RADIUS 一致）。
+/* 浮動虛擬搖桿底座（直徑 120px;script 的 JOYSTICK_KNOB_RANGE 以半徑 60px 為基準）。
    position:fixed + translate(-50%,-50%) 以中心對齊定位點；active 時跟手指、idle 時半透明置中下。 */
 .joystick-base {
   position: fixed;
@@ -1655,7 +1661,7 @@ onBeforeUnmount(() => {
   height: 120px;
   border-radius: var(--radius-circle);
   background: var(--color-scene-panel);
-  border: 2px solid rgba(255, 255, 255, 0.18);
+  border: 2px solid var(--glass-border);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   transform: translate(-50%, -50%);
   opacity: 0.35; /* idle：淡 */
@@ -1698,12 +1704,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 720px) {
   .scene-view {
-    height: calc(100dvh - 112px);
-    min-height: 520px;
-  }
-
-  .scene-canvas {
-    border-radius: var(--radius-md);
+    height: 100dvh;
   }
 
   .hint {
@@ -1748,7 +1749,7 @@ onBeforeUnmount(() => {
   .scene-view {
     display: flex;
     flex-direction: column;
-    height: calc(100dvh - 104px);
+    height: 100dvh;
   }
 
   .scene-canvas {
@@ -1765,10 +1766,11 @@ onBeforeUnmount(() => {
     padding: var(--space-2);
   }
 
+  /* 兩欄並排,底部列高度減半(文字 text-xs 放得下) */
   .scene-flow-actions {
     position: static;
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3) var(--space-3);
     flex-shrink: 0;
@@ -1786,10 +1788,24 @@ onBeforeUnmount(() => {
   }
 }
 
+/* 極窄手機:小地圖與模式鈕再縮一級 */
+@media (max-width: 360px) {
+  .minimap {
+    width: 100px;
+    height: 100px;
+    top: 56px;
+  }
+
+  .mode-btn {
+    min-height: 36px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+  }
+}
+
 @media (max-height: 620px) and (orientation: landscape) {
   .scene-view {
-    height: calc(100dvh - 84px);
-    min-height: 360px;
+    height: 100dvh;
   }
 
   .scene-flow-actions {

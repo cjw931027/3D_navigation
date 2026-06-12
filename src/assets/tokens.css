@@ -1,74 +1,88 @@
 /* ============================================================================
    Design tokens
-   - 淺色為預設(:root)。深色透過 (a) 跟隨系統 prefers-color-scheme
-     (b) 手動 <html data-theme="dark"> 兩條軌道覆寫(見檔末)。
-   - 顏色盡量語意化(bg/card/text/border/status),方便深色一一對應。
-   - 品牌色:Indigo(#4f46e5) → Cyan(#06b6d4),主要 CTA 用漸層。
+   - 深色為預設(:root),對齊最初 mockup 的深藍黑底 + 單一藍色強調。
+   - 淺色透過 <html data-theme="light"> 整組覆寫(明確二態,不再跟隨系統)。
+   - 顏色盡量語意化(bg/card/text/border/status),方便淺色一一對應。
+   - 品牌色:Blue(#3b82f6) 為主;Cyan(#22d3ee) 作為科技感點綴,少量使用。
+   - BP: 900px = 桌面側欄殼層 / 手機單欄 的主斷點(media query 無法讀變數,
+     各檔以註解約定)。
    ============================================================================ */
 :root {
+  color-scheme: dark;
+
   /* Brand */
-  --color-primary: #4f46e5;
-  --color-primary-hover: #4338ca;
-  --color-primary-ring: rgba(79, 70, 229, 0.18);
-  --color-accent: #06b6d4;
-  --color-accent-hover: #0891b2;
-  --color-success: #10b981;
-  --color-danger: #ef4444;
-  --color-danger-dark: #b91c1c;
+  --color-primary: #3b82f6;
+  --color-primary-hover: #60a5fa;
+  --color-primary-ring: rgba(59, 130, 246, 0.32);
+  --color-accent: #22d3ee;
+  --color-accent-hover: #67e8f9;
+  --color-success: #34d399;
+  --color-danger: #f87171;
+  --color-danger-dark: #ef4444;
   --color-white: #ffffff;
 
-  /* 主題漸層(CTA / 重點按鈕 / active 焦點) */
-  --gradient-primary: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
-  --gradient-primary-hover: linear-gradient(135deg, #4338ca 0%, #0891b2 100%);
+  /* 主題漸層(CTA / 重點按鈕):近平面藍,保留些微層次 */
+  --gradient-primary: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
 
-  /* Text(收斂為常用幾階；深色會整組覆寫) */
-  --color-text: #1a1a2e;
-  --color-text-secondary: #2f3346;
-  --color-text-tertiary: #444b5e;
-  --color-text-soft: #545b6e;
-  --color-text-disabled: #6b7280;
-  --color-text-muted: #8b91a1;
-  --color-text-faded: #9aa0b0;
-  --color-text-placeholder: #aab0c0;
-  --color-text-hint: #c2c7d4;
-  --color-text-tick: #d2d6e0;
+  /* Text(亮 → 暗階梯) */
+  --color-text: #ecf2f8;
+  --color-text-secondary: #cdd9e6;
+  --color-text-tertiary: #b4c4d6;
+  --color-text-soft: #97abc0;
+  --color-text-disabled: #64788d;
+  --color-text-muted: #7e92a8;
+  --color-text-faded: #5d7186;
+  --color-text-placeholder: #4d6075;
+  --color-text-hint: #8094a9;
+  --color-text-tick: #314256;
 
   /* Surfaces / borders */
-  --color-bg-page: #f4f5fb; /* 全站底色 */
-  --color-bg-card: #ffffff;
-  --color-bg-soft: #f4f5fb;
-  --color-bg-hover: #eef0f8;
-  --color-bg-neutral: #e9ebf3;
-  --color-bg-chip: #e4e7f0;
-  --color-border: #e2e5ee;
-  --color-border-light: #edeff5;
+  --color-bg-page: #0d1620; /* 全站底色:深藍黑 */
+  --color-bg-card: #121e2c;
+  --color-bg-soft: #101a27;
+  --color-bg-hover: #18283a;
+  --color-bg-neutral: #1b2c3f;
+  --color-bg-chip: #20344a;
+  --color-border: #223449;
+  --color-border-light: #1a2a3c;
 
   /* Status panels */
-  --color-warn-bg: #fff8e1;
-  --color-warn-border: #ffe082;
-  --color-warn-text: #6d4c00;
-  --color-info-bg: #eef2ff; /* 改為與 indigo 同調的淺底 */
-  --color-info-text: #3730a3;
-  --color-success-bg: #ecfdf5;
-  --color-success-text: #047857;
+  --color-warn-bg: #3a2f10;
+  --color-warn-border: #5c4a18;
+  --color-warn-text: #fcd34d;
+  --color-info-bg: #14283f;
+  --color-info-text: #93c5fd;
+  --color-success-bg: #0d2f25;
+  --color-success-text: #6ee7b7;
 
   /* Map-type badge (line art) */
-  --color-badge-line-bg: #f3e5f5;
-  --color-badge-line-text: #6a1b9a;
+  --color-badge-line-bg: #3a1f47;
+  --color-badge-line-text: #e9d5ff;
 
   /* Map-type override warning */
-  --color-override-text: #c2410c;
-  --color-override-bg: #fff3e0;
+  --color-override-text: #fdba74;
+  --color-override-bg: #3a2410;
 
-  /* Scene (3D) dark theme(本來就深色,維持) */
-  --color-scene-panel: rgba(22, 33, 62, 0.85);
+  /* Scene (3D) 浮層 */
+  --color-scene-panel: rgba(13, 22, 32, 0.72);
   --color-scene-text: #e6e8f0;
   --color-scene-accent: #22d3ee;
   --color-scene-warning: rgba(180, 40, 60, 0.92);
   --color-scene-warning-text: #fca5a5;
 
   /* Overlays */
-  --color-overlay: rgba(15, 18, 30, 0.55);
+  --color-overlay: rgba(4, 10, 16, 0.62);
+
+  /* 玻璃感浮層(導覽列 / 3D 控制項 / 抽屜) */
+  --glass-bg: rgba(13, 22, 32, 0.66);
+  --glass-border: rgba(148, 163, 184, 0.18);
+  --blur-glass: 14px;
+
+  /* 殼層尺寸 */
+  --sidebar-w: 264px;
+  --drawer-w: 380px;
+  --cta-h: 52px;
 
   /* Typography — font size(整體放大一階,標題更有份量) */
   --text-xs: 12px;
@@ -104,10 +118,11 @@
   --radius-circle: 50%;
 
   /* Shadows(分層階梯,建立景深) */
-  --shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.06);
-  --shadow-sm: 0 2px 8px rgba(17, 24, 39, 0.08);
-  --shadow-md: 0 6px 18px rgba(17, 24, 39, 0.12);
-  --shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.18);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --shadow-glow: 0 8px 24px rgba(37, 99, 235, 0.35);
   --shadow-magnifier: 0 2px 10px rgba(0, 0, 0, 0.3);
   --shadow-thumb: 0 1px 3px rgba(0, 0, 0, 0.2);
 
@@ -118,120 +133,68 @@
   --dur-slow: 0.4s;
 }
 
-/* ── 深色主題(語意變數整組覆寫)──────────────────────────────
-   兩條軌道：手動 data-theme="dark" 優先；無手動設定時跟隨系統。 */
-:root[data-theme='dark'] {
-  --color-primary: #6366f1;
-  --color-primary-hover: #818cf8;
-  --color-primary-ring: rgba(99, 102, 241, 0.3);
-  --color-accent: #22d3ee;
-  --color-accent-hover: #67e8f9;
-  --color-success: #34d399;
-  --color-danger: #f87171;
-  --color-danger-dark: #ef4444;
+/* ── 淺色主題(語意變數整組覆寫,opt-in)─────────────────────── */
+:root[data-theme='light'] {
+  color-scheme: light;
 
-  --gradient-primary: linear-gradient(135deg, #6366f1 0%, #22d3ee 100%);
-  --gradient-primary-hover: linear-gradient(135deg, #818cf8 0%, #67e8f9 100%);
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-ring: rgba(37, 99, 235, 0.16);
+  --color-accent: #0891b2;
+  --color-accent-hover: #06b6d4;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-danger-dark: #b91c1c;
 
-  --color-text: #e7e9f3;
-  --color-text-secondary: #d2d6e6;
-  --color-text-tertiary: #c0c5da;
-  --color-text-soft: #a8aec6;
-  --color-text-disabled: #7c8198;
-  --color-text-muted: #8b91a8;
-  --color-text-faded: #6f758c;
-  --color-text-placeholder: #5b6178;
-  --color-text-hint: #4a5066;
-  --color-text-tick: #3a4058;
+  --gradient-primary: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
 
-  --color-bg-page: #0f1320;
-  --color-bg-card: #181d2e;
-  --color-bg-soft: #141927;
-  --color-bg-hover: #222840;
-  --color-bg-neutral: #232a42;
-  --color-bg-chip: #2a3150;
-  --color-border: #2a3047;
-  --color-border-light: #232940;
+  --color-text: #10202f;
+  --color-text-secondary: #28394b;
+  --color-text-tertiary: #3c4f63;
+  --color-text-soft: #51647a;
+  --color-text-disabled: #74859a;
+  --color-text-muted: #8295aa;
+  --color-text-faded: #94a5b8;
+  --color-text-placeholder: #a4b3c4;
+  --color-text-hint: #5d7186;
+  --color-text-tick: #c4cfdc;
 
-  --color-warn-bg: #3a2f10;
-  --color-warn-border: #5c4a18;
-  --color-warn-text: #fcd34d;
-  --color-info-bg: #1e2547;
-  --color-info-text: #c7d2fe;
-  --color-success-bg: #11352a;
-  --color-success-text: #6ee7b7;
+  --color-bg-page: #f4f7fb;
+  --color-bg-card: #ffffff;
+  --color-bg-soft: #eef2f8;
+  --color-bg-hover: #e7edf5;
+  --color-bg-neutral: #e2e9f2;
+  --color-bg-chip: #dbe4ef;
+  --color-border: #dde5ee;
+  --color-border-light: #e9eef5;
 
-  --color-badge-line-bg: #3a1f47;
-  --color-badge-line-text: #e9d5ff;
-  --color-override-text: #fdba74;
-  --color-override-bg: #3a2410;
+  --color-warn-bg: #fff8e1;
+  --color-warn-border: #ffe082;
+  --color-warn-text: #6d4c00;
+  --color-info-bg: #e8f0fe;
+  --color-info-text: #1d4ed8;
+  --color-success-bg: #ecfdf5;
+  --color-success-text: #047857;
 
-  --color-overlay: rgba(0, 0, 0, 0.65);
+  --color-badge-line-bg: #f3e5f5;
+  --color-badge-line-text: #6a1b9a;
+  --color-override-text: #c2410c;
+  --color-override-bg: #fff3e0;
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --color-overlay: rgba(15, 23, 42, 0.45);
+
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(15, 23, 42, 0.08);
+
+  --shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.06);
+  --shadow-sm: 0 2px 8px rgba(17, 24, 39, 0.08);
+  --shadow-md: 0 6px 18px rgba(17, 24, 39, 0.12);
+  --shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.18);
+  --shadow-glow: 0 8px 24px rgba(37, 99, 235, 0.25);
 }
 
-@media (prefers-color-scheme: dark) {
-  /* 只有「未手動指定 light」時才套系統深色（data-theme=light 可強制淺色）。 */
-  :root:not([data-theme='light']) {
-    --color-primary: #6366f1;
-    --color-primary-hover: #818cf8;
-    --color-primary-ring: rgba(99, 102, 241, 0.3);
-    --color-accent: #22d3ee;
-    --color-accent-hover: #67e8f9;
-    --color-success: #34d399;
-    --color-danger: #f87171;
-    --color-danger-dark: #ef4444;
-
-    --gradient-primary: linear-gradient(135deg, #6366f1 0%, #22d3ee 100%);
-    --gradient-primary-hover: linear-gradient(135deg, #818cf8 0%, #67e8f9 100%);
-
-    --color-text: #e7e9f3;
-    --color-text-secondary: #d2d6e6;
-    --color-text-tertiary: #c0c5da;
-    --color-text-soft: #a8aec6;
-    --color-text-disabled: #7c8198;
-    --color-text-muted: #8b91a8;
-    --color-text-faded: #6f758c;
-    --color-text-placeholder: #5b6178;
-    --color-text-hint: #4a5066;
-    --color-text-tick: #3a4058;
-
-    --color-bg-page: #0f1320;
-    --color-bg-card: #181d2e;
-    --color-bg-soft: #141927;
-    --color-bg-hover: #222840;
-    --color-bg-neutral: #232a42;
-    --color-bg-chip: #2a3150;
-    --color-border: #2a3047;
-    --color-border-light: #232940;
-
-    --color-warn-bg: #3a2f10;
-    --color-warn-border: #5c4a18;
-    --color-warn-text: #fcd34d;
-    --color-info-bg: #1e2547;
-    --color-info-text: #c7d2fe;
-    --color-success-bg: #11352a;
-    --color-success-text: #6ee7b7;
-
-    --color-badge-line-bg: #3a1f47;
-    --color-badge-line-text: #e9d5ff;
-    --color-override-text: #fdba74;
-    --color-override-bg: #3a2410;
-
-    --color-overlay: rgba(0, 0, 0, 0.65);
-
-    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
-    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
-    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
-  }
-}
-
-/* 尊重使用者「減少動態」偏好：關閉非必要動效。 */
+/* 尊重使用者「減少動態」偏好:關閉非必要動效。 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

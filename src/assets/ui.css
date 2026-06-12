@@ -1,0 +1,136 @@
+/* ============================================================================
+   共用 UI 工具類
+   - .btn 系列同時適用 <button> 與 <RouterLink>(a 標籤),統一外觀與互動。
+   - .glass:毛玻璃浮層配方(導覽列 / 3D 控制項 / 抽屜)。
+   ============================================================================ */
+
+/* 全域 border-box:width:100% + padding 才不會撐破容器(如側欄按鈕)。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 鍵盤焦點環:全站統一藍色外框(滑鼠點擊不觸發)。 */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 10px var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.btn--primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-white);
+}
+.btn--primary:not(:disabled):hover {
+  background: var(--color-primary-hover);
+  border-color: var(--color-primary-hover);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn--ghost {
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+  background: transparent;
+}
+.btn--ghost:not(:disabled):hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.btn--danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  background: transparent;
+}
+.btn--danger:not(:disabled):hover {
+  background: var(--color-danger);
+  color: var(--color-white);
+}
+
+/* 大藥丸 CTA(mockup 的「下一步 / 開始執行」)。
+   52px 是手機拇指尺寸;桌面窄側欄裡收斂到 44px 才不顯笨重。BP: 900px */
+.btn--pill {
+  width: 100%;
+  min-height: var(--cta-h);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-md);
+}
+
+@media (min-width: 900px) {
+  .btn--pill {
+    min-height: 44px;
+  }
+}
+
+/* 圓形圖示鈕 */
+.btn--icon {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: var(--radius-circle);
+  border-color: var(--color-border);
+  color: var(--color-text-soft);
+}
+.btn--icon:not(:disabled):hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* 毛玻璃浮層 */
+.glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: saturate(160%) blur(var(--blur-glass));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--blur-glass));
+}
+
+/* 視覺隱藏但可聚焦(file input 等) */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

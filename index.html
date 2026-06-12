@@ -1,10 +1,18 @@
-<!DOCTYPE html>
-<html lang="">
+<!doctype html>
+<html lang="zh-Hant" data-theme="dark">
   <head>
-    <meta charset="UTF-8">
-    <link rel="icon" href="/favicon.ico">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vite App</title>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d1620" />
+    <title>3D 室內導航</title>
+    <!-- 首屏前套用主題,避免淺色偏好的使用者看到深色閃爍。 -->
+    <script>
+      try {
+        var t = localStorage.getItem('theme-pref')
+        document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark')
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="app"></div>

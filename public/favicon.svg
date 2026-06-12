@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0d1620"/>
+  <!-- 導航箭頭(paper-plane 風格) -->
+  <path d="M50 14 L14 30 L29 35 L34 50 Z" fill="#3b82f6" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M50 14 L29 35" stroke="#0d1620" stroke-width="2" stroke-linejoin="round"/>
+</svg>
