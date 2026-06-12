@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, toRaw } from 'vue'
+import { computed, nextTick, onMounted, ref, toRaw } from 'vue'
 import { ImageOff, SlidersHorizontal, Upload } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
 import { useIsDesktop } from '@/composables/useBreakpoint'
@@ -32,19 +32,19 @@ const canGoToScene = computed(() => mapStore.passableMask != null && mapStore.pa
 const tooltips: Record<string, { problem: string; fix: string }> = {
   pathColorTolerance: {
     problem: '識別到的區域太小、路徑顏色不均勻',
-    fix: '往右(數值調高);若識別到太多不相關區域則往左',
+    fix: '往右（數值調高）；若識別到太多不相關區域則往左',
   },
   closingKernelSize: {
     problem: '路上有文字或圖示造成路徑中斷',
-    fix: '往右(數值調高);若路徑邊緣模糊則往左',
+    fix: '往右（數值調高）；若路徑邊緣模糊則往左',
   },
   wallThicken: {
     problem: '路徑從牆壁細縫漏出、蔓延到不該去的區域',
-    fix: '往右(數值調高);若路徑被截斷、範圍偏小則往左',
+    fix: '往右（數值調高）；若路徑被截斷、範圍偏小則往左',
   },
   sampleRadius: {
-    problem: '種子點採到錯誤顏色(點到邊緣或雜色位置)',
-    fix: '往右(數值調高);若路面顏色不均勻採色不準則往左',
+    problem: '種子點採到錯誤顏色（點到邊緣或雜色位置）',
+    fix: '往右（數值調高）；若路面顏色不均勻採色不準則往左',
   },
 }
 
@@ -135,7 +135,8 @@ function renderToCanvas(
   canvas.height = height
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
-  ctx.putImageData(new ImageData(buffer as any, width, height), 0, 0)
+  // DOM lib 要求 ArrayBuffer-backed;此處 buffer 一律由 new Uint8ClampedArray() 建立,斷言安全。
+  ctx.putImageData(new ImageData(buffer as Uint8ClampedArray<ArrayBuffer>, width, height), 0, 0)
   return ctx
 }
 
@@ -144,7 +145,7 @@ const runFloodFill = () => {
   if (!mapStore.wasmModule) return showToast('引擎尚未就緒')
   const rawData = toRaw(mapStore.imageRawData)
   if (!rawData || mapStore.mapWidth === 0) return showToast('尚未載入地圖')
-  if (!mapStore.seedPoints.length) return showToast('缺少種子點,請回上傳頁重新標記')
+  if (!mapStore.seedPoints.length) return showToast('缺少種子點，請回上傳頁重新標記')
 
   const width = mapStore.mapWidth
   const height = mapStore.mapHeight
@@ -264,11 +265,11 @@ const runFloodFill = () => {
     if (nodeCount > 0) {
       pathStatus.value = `路徑長度 ${nodeCount} 段`
     } else if (mapStore.startPoint && mapStore.endPoint) {
-      pathStatus.value = '找不到路徑,請確認起訖點位於可通行區域'
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
   } catch (err) {
     console.error('runFloodFill 失敗:', err)
-    pathStatus.value = '運算發生錯誤,請查看 console'
+    pathStatus.value = '運算發生錯誤，請查看 console'
   } finally {
     isRunning.value = false
   }
@@ -278,7 +279,7 @@ const runFloodFill = () => {
 const runAStarOnly = () => {
   if (!mapStore.wasmModule || !mapStore.isEngineReady) return
   if (!mapStore.startPoint || !mapStore.endPoint) return showToast('請先設定起點與終點')
-  if (!mapStore.floodFillResultData) return showToast('請先執行一次路徑識別,再使用重算路徑')
+  if (!mapStore.floodFillResultData) return showToast('請先執行一次路徑識別，再使用重算路徑')
 
   isRunning.value = true
   pathStatus.value = null
@@ -292,15 +293,33 @@ const runAStarOnly = () => {
     if (nodeCount > 0) {
       pathStatus.value = `路徑長度 ${nodeCount} 段`
     } else {
-      pathStatus.value = '找不到路徑,請確認起訖點位於可通行區域'
+      pathStatus.value = '找不到路徑，請確認起訖點位於可通行區域'
     }
   } catch (err) {
     console.error('runAStarOnly 失敗:', err)
-    pathStatus.value = '運算發生錯誤,請查看 console'
+    pathStatus.value = '運算發生錯誤，請查看 console'
   } finally {
     isRunning.value = false
   }
 }
+
+// 進入頁面時還原預覽:有上次識別結果就畫結果+路徑,否則先畫原圖+起訖點,
+// 避免初次進入或從 3D 場景返回時預覽卡一片空白。
+onMounted(async () => {
+  if (mapStore.mapWidth === 0) return // empty-state 分支,無 canvas
+  await nextTick()
+
+  if (mapStore.floodFillResultData) {
+    const ctx = renderToCanvas(mapStore.floodFillResultData, mapStore.mapWidth, mapStore.mapHeight)
+    if (ctx) drawOverlay(ctx)
+    return
+  }
+
+  const rawData = toRaw(mapStore.imageRawData)
+  if (!rawData) return
+  const ctx = renderToCanvas(new Uint8ClampedArray(rawData), mapStore.mapWidth, mapStore.mapHeight)
+  if (ctx) drawOverlay(ctx)
+})
 </script>
 
 <template>
@@ -311,7 +330,7 @@ const runAStarOnly = () => {
       </div>
       <h2 class="empty-title">還沒有載入地圖</h2>
       <p class="empty-desc">
-        請先上傳室內平面圖並標記起點與終點,<br />
+        請先上傳室內平面圖並標記起點與終點，<br />
         系統才能識別可通行路徑。
       </p>
       <RouterLink to="/upload" class="btn btn--primary empty-action">
@@ -325,7 +344,7 @@ const runAStarOnly = () => {
       <section class="preview-pane">
         <header class="pane-head">
           <h1>路徑識別</h1>
-          <p class="pane-sub">執行識別後,確認可行走區域(藍)與規劃路徑(紅)。</p>
+          <p class="pane-sub">執行識別後，確認可行走區域（藍）與規劃路徑（紅）。</p>
         </header>
         <div class="canvas-card">
           <canvas ref="previewCanvas"></canvas>
@@ -342,7 +361,7 @@ const runAStarOnly = () => {
               @click="runFloodFill"
               :disabled="!mapStore.isEngineReady || isRunning"
             >
-              {{ isRunning ? '運算中...' : '執行路徑識別' }}
+              {{ isRunning ? '運算中…' : '執行路徑識別' }}
             </button>
             <button
               class="btn btn--ghost btn--pill run-again"
@@ -354,7 +373,7 @@ const runAStarOnly = () => {
                 !mapStore.endPoint ||
                 !mapStore.floodFillResultData
               "
-              title="保留目前識別結果,重新計算起訖點之間的最短路徑"
+              title="保留目前識別結果，重新計算起訖點之間的最短路徑"
             >
               重算路徑
             </button>
@@ -382,12 +401,12 @@ const runAStarOnly = () => {
 
           <!-- 流程導覽 -->
           <div class="flow-actions">
-            <RouterLink to="/upload" class="btn btn--ghost">上一步:上傳地圖</RouterLink>
+            <RouterLink to="/upload" class="btn btn--ghost">上一步：上傳地圖</RouterLink>
             <RouterLink v-if="canGoToScene" to="/scene" class="btn btn--primary btn--pill">
-              下一步:3D 場景
+              下一步：3D 場景
             </RouterLink>
             <button v-else class="btn btn--primary btn--pill" type="button" disabled>
-              下一步:3D 場景
+              下一步：3D 場景
             </button>
           </div>
         </div>
@@ -454,9 +473,9 @@ const runAStarOnly = () => {
               mapStore.setClipMode(Number(($event.target as HTMLSelectElement).value) as 0 | 1 | 2)
             "
           >
-            <option :value="0">無(室內多色底圖)</option>
-            <option :value="1">牆包圍盒(建物密集的戶外圖)</option>
-            <option :value="2">灰色外框(院區圖有外框線)</option>
+            <option :value="0">無（室內多色底圖）</option>
+            <option :value="1">牆包圍盒（建物密集的戶外圖）</option>
+            <option :value="2">灰色外框（院區圖有外框線）</option>
           </select>
         </div>
 
@@ -478,30 +497,30 @@ const runAStarOnly = () => {
         <div class="drawer-section">
           <div class="drawer-section-label">遮罩過濾</div>
           <ParamSlider
-            label="破碎區塊門檻(像素數)"
+            label="破碎區塊門檻（像素數）"
             :model-value="mapStore.denoiseMinArea"
             :min="0"
             :max="400"
             :step="10"
-            hint="BFS 後自動清除遮罩中面積過小的孤立連通域,設為 0 可關閉"
+            hint="BFS 後自動清除遮罩中面積過小的孤立連通域，設為 0 可關閉"
             @update:model-value="(v) => (mapStore.denoiseMinArea = v)"
           />
           <ParamSlider
-            label="平滑:補洞核大小"
+            label="平滑：補洞核大小"
             :model-value="mapStore.floodFillParams.smoothClosingSize"
             :min="1"
             :max="9"
             :step="2"
-            hint="走廊內小字 / 圖示形成的小洞會被填補;偵測到的真牆絕不會被覆蓋。設為 1 可關閉"
+            hint="走廊內小字 / 圖示形成的小洞會被填補；偵測到的真牆絕不會被覆蓋。設為 1 可關閉"
             @update:model-value="(v) => mapStore.setFloodFillParams({ smoothClosingSize: v })"
           />
           <ParamSlider
-            label="平滑:孤立小牆面積"
+            label="平滑：孤立小牆面積"
             :model-value="mapStore.floodFillParams.smoothMinWallArea"
             :min="0"
             :max="1200"
             :step="25"
-            hint="走廊內面積小於此值、且被可走區包圍、不接觸真牆的障礙(樓梯/閘門/文字圖示啃出的缺口)會被翻為可走;真牆與獨立非路面塊一律保留。設為 0 可關閉"
+            hint="走廊內面積小於此值、且被可走區包圍、不接觸真牆的障礙（樓梯/閘門/文字圖示啃出的缺口）會被翻為可走；真牆與獨立非路面塊一律保留。設為 0 可關閉"
             @update:model-value="(v) => mapStore.setFloodFillParams({ smoothMinWallArea: v })"
           />
         </div>
@@ -682,14 +701,24 @@ canvas {
   margin-top: var(--space-2);
 }
 
+/* 執行 + 重算同一排:主鈕撐滿剩餘寬度,重算縮到內容寬 */
 .run-block {
   display: flex;
-  flex-direction: column;
   gap: var(--space-2);
 }
 
+.run-block .btn--pill {
+  width: auto;
+  min-width: 0;
+}
+
+.run-main {
+  flex: 1 1 auto;
+}
+
 .run-again {
-  width: 100%;
+  flex: 0 1 auto;
+  white-space: nowrap;
 }
 
 .result-card {
@@ -742,16 +771,31 @@ canvas {
 
 /* 手機:流程按鈕 sticky 在底部(mockup 的大藥丸 CTA),橫排減少佔位。 */
 @media (max-width: 899.98px) {
+  /* 大標題與頂部步驟清單的「路徑識別/目前步驟」重複,手機隱藏省空間 */
+  h1 {
+    display: none;
+  }
+
+  /* inline 渲染時與上方預覽卡保持間距 */
+  .controls {
+    margin-top: var(--space-4);
+  }
+
+  /* 貼底實底工具列:半透明底+模糊,捲動時內容從後方通過不透字 */
   .flow-actions {
     position: sticky;
-    bottom: var(--space-3);
+    bottom: 0;
     z-index: 5;
     margin-top: var(--space-2);
+    margin-inline: calc(-1 * var(--space-4));
+    padding: var(--space-2) var(--space-4) var(--space-3);
     flex-direction: row;
+    background: color-mix(in srgb, var(--color-bg-page) 92%, transparent);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
 
   .flow-actions .btn--ghost {
-    background: var(--color-bg-page);
     flex: 0 0 auto;
     min-height: var(--cta-h);
     border-radius: var(--radius-pill);

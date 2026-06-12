@@ -5,7 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { useMapStore } from '@/stores/mapStore'
 import { canStandAt, moveCircle, type GridMask } from '@/utils/circleCollision'
-import { extractAndRasterize, type Ring, type Pt } from '@/utils/contourUtils'
+import { extractAndRasterize, type Pt } from '@/utils/contourUtils'
 import {
   buildSegGrid,
   canStandAtPoly,
@@ -86,9 +86,8 @@ const debugHeading = ref(0)
 // template 不可直接用 Math，這裡把 heading 轉成度數字串供 debug 疊層顯示。
 const debugHeadingDeg = computed(() => ((debugHeading.value * 180) / Math.PI).toFixed(0))
 
-// 搖桿底座半徑（CSS px）——視覺底座尺寸（直徑 = 2×此值），須與 style 的 .joystick-base 尺寸一致。
-const JOYSTICK_BASE_RADIUS = 60
-// 搖桿頭最大可離開中心的像素（略小於底座半徑，留邊）。pointermove 正規化以此為準。
+// 搖桿頭最大可離開中心的像素（略小於底座半徑 60px，留邊;底座直徑見 style 的 .joystick-base）。
+// pointermove 正規化以此為準。
 const JOYSTICK_KNOB_RANGE = 44
 
 // 多點觸控分流：分別記錄搖桿/轉視角手指的 pointerId（允許雙指同時，勿用單一全域狀態）。
@@ -105,7 +104,6 @@ let sceneHalfW = 0
 let sceneHalfH = 0
 let sceneUp = 1
 let sceneEyeHeight = 1.2
-let sceneWallHeight = 2
 // 碰撞遮罩（網格版）：USE_CONTOUR_WALLS=false 的 box fallback 仍用它；輪廓模式改用 collisionSegs。
 let collisionMask: Uint8Array | null = null
 let collisionW = 0
@@ -344,7 +342,6 @@ function buildGeometry() {
   sceneHalfW = halfW
   sceneHalfH = halfH
   sceneUp = mapStore.upscaleFactor || 1
-  sceneWallHeight = wallHeight
   sceneEyeHeight = wallHeight * 0.75
 
   // pxToColl 與 pxToDisplay 完全相同（兩者都是「原始 px 座標 → ds 網格座標」的係數）
@@ -419,7 +416,7 @@ function buildGeometry() {
 
   // -- 抽輪廓 → 分類 → 簡化 → 內偏 → 烤回 smoothedMask（一次完成） --
   const contour = extractAndRasterize(data, width, height, DP_EPSILON_CELLS, INWARD_BIAS_CELLS)
-  const { simpOuters, simpHolesByOuter, allRings, smoothedMask, stats } = contour
+  const { simpOuters, simpHolesByOuter, allRings, smoothedMask } = contour
 
   // 碰撞改用輪廓線段（與視覺牆同一串環）：轉成線段 + 空間網格，碰撞邊界 = 視覺斜線、不穿牆。
   collisionSegs = buildSegGrid(ringsToSegments(allRings))
@@ -465,7 +462,6 @@ function buildGeometry() {
   for (const r of allRings) if (r.length >= 2) edgeCount += r.length
 
   let wallMerged: THREE.BufferGeometry | null = null
-  let wallQuads = 0
   if (edgeCount > 0) {
     const positions = new Float32Array(edgeCount * 6 * 3)
     let o = 0
@@ -490,7 +486,6 @@ function buildGeometry() {
         pushV(x1, 0, z1)
         pushV(x1, wallHeight, z1)
         pushV(x2, wallHeight, z2)
-        wallQuads++
       }
     }
     wallMerged = new THREE.BufferGeometry()
@@ -498,59 +493,6 @@ function buildGeometry() {
     wallMerged.computeVertexNormals()
     mapGroup.add(new THREE.Mesh(wallMerged, wallMat))
   }
-
-  // 統計輸出（含 bounding box 自查 + smoothedMask 差異）
-  const triCount = (g: THREE.BufferGeometry | null) => {
-    if (!g) return 0
-    if (g.index) return g.index.count / 3
-    return (g.attributes.position?.count ?? 0) / 3
-  }
-  const bboxY = (g: THREE.BufferGeometry | null): [number, number] => {
-    if (!g) return [0, 0]
-    g.computeBoundingBox()
-    const b = g.boundingBox
-    return b ? [b.min.y, b.max.y] : [0, 0]
-  }
-  const wallTris = triCount(wallMerged)
-  const floorTris = triCount(floorMerged)
-  const [wMinY, wMaxY] = bboxY(wallMerged)
-  const [fMinY, fMaxY] = bboxY(floorMerged)
-  console.log(
-    '[SceneView] contour walls: %dx%d grid, rings raw=%d (outer=%d, holes=%d), verts %d → %d (%.1f%% after DP+bias)',
-    width,
-    height,
-    stats.rawRingCount,
-    stats.outerCount,
-    stats.holeCount,
-    stats.rawVerts,
-    stats.simpVerts,
-    stats.rawVerts > 0 ? (100 * stats.simpVerts) / stats.rawVerts : 0,
-  )
-  console.log(
-    '[SceneView] smoothedMask: passable cells %d → %d (diff %.2f%%)',
-    stats.originalPassable,
-    stats.smoothedPassable,
-    stats.diffPercent,
-  )
-  console.log(
-    '[SceneView] poly collision: %d segments; start point passable=%s',
-    collisionSegs ? collisionSegs.segs.length : 0,
-    mapStore.startPoint
-      ? String(isPassableAtPixel(mapStore.startPoint.x, mapStore.startPoint.y))
-      : 'n/a',
-  )
-  console.log(
-    '[SceneView] geometry: wall quads=%d (tris=%d), floor tris=%d, wallHeight=%.3f | wall bbox.y=[%.3f, %.3f] (expect [0, %.3f]), floor bbox.y=[%.3f, %.3f] (expect ~0)',
-    wallQuads,
-    wallTris,
-    floorTris,
-    wallHeight,
-    wMinY,
-    wMaxY,
-    wallHeight,
-    fMinY,
-    fMaxY,
-  )
 }
 
 // 動態指引路徑：從 userPosition 在路徑上的最近投影點回傳「腳下到終點」的節點（沿路走會縮短）。
@@ -1143,30 +1085,6 @@ function enterFirstPerson() {
   lastPathBuildPos = null
   lastReplanTs = 0
   buildPath()
-  // === Bug1 診斷：起點 / 起點是否可走 / snap 結果 / snap 結果是否可走 ===
-  // 用來判別問題是「起點被判不可走」還是「snap 找錯點」。實測排查後可移除。
-  if (mapStore.startPoint) {
-    const sp = mapStore.startPoint
-    const startOk = isPassableAtPixel(sp.x, sp.y)
-    const startInside = isInsideWalkable(sp.x, sp.y)
-    const snapped = snapToNearestPassable(sp.x, sp.y)
-    const snapOk = isPassableAtPixel(snapped.x, snapped.y)
-    const snapInside = isInsideWalkable(snapped.x, snapped.y)
-    console.log(
-      '[SceneView][enterFP] startPoint=(%d,%d) passable=%s inside=%s | snap=(%.1f,%.1f) passable=%s inside=%s | userPos=(%.1f,%.1f) | mode=%s',
-      sp.x,
-      sp.y,
-      String(startOk),
-      String(startInside),
-      snapped.x,
-      snapped.y,
-      String(snapOk),
-      String(snapInside),
-      mapStore.userPosition?.x ?? NaN,
-      mapStore.userPosition?.y ?? NaN,
-      collisionSegs ? 'poly' : 'grid',
-    )
-  }
   mapGroup.rotation.y = 0
   pathGroup.rotation.y = 0
   // 第一人稱由 updateCamera 直接控制相機，停用 OrbitControls 以免互搶。
@@ -1733,7 +1651,7 @@ onBeforeUnmount(() => {
   -webkit-user-select: none;
 }
 
-/* 浮動虛擬搖桿底座（直徑須與 script 的 JOYSTICK_BASE_RADIUS 一致）。
+/* 浮動虛擬搖桿底座（直徑 120px;script 的 JOYSTICK_KNOB_RANGE 以半徑 60px 為基準）。
    position:fixed + translate(-50%,-50%) 以中心對齊定位點；active 時跟手指、idle 時半透明置中下。 */
 .joystick-base {
   position: fixed;
@@ -1848,10 +1766,11 @@ onBeforeUnmount(() => {
     padding: var(--space-2);
   }
 
+  /* 兩欄並排,底部列高度減半(文字 text-xs 放得下) */
   .scene-flow-actions {
     position: static;
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3) var(--space-3);
     flex-shrink: 0;
@@ -1866,6 +1785,21 @@ onBeforeUnmount(() => {
 
   .offpath-banner {
     top: 150px;
+  }
+}
+
+/* 極窄手機:小地圖與模式鈕再縮一級 */
+@media (max-width: 360px) {
+  .minimap {
+    width: 100px;
+    height: 100px;
+    top: 56px;
+  }
+
+  .mode-btn {
+    min-height: 36px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
   }
 }
 

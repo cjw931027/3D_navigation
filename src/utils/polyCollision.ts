@@ -40,8 +40,7 @@ export function buildSegGrid(segs: Seg[], cell = 4): SegGrid {
   }
   const cols = Math.max(1, Math.ceil((maxX - minX) / cell) + 1)
   const rows = Math.max(1, Math.ceil((maxY - minY) / cell) + 1)
-  const buckets: number[][] = new Array(cols * rows)
-  for (let i = 0; i < buckets.length; i++) buckets[i] = []
+  const buckets: number[][] = Array.from({ length: cols * rows }, () => [])
   const clampCol = (c: number) => Math.max(0, Math.min(cols - 1, c))
   const clampRow = (r: number) => Math.max(0, Math.min(rows - 1, r))
   for (let i = 0; i < segs.length; i++) {
@@ -50,8 +49,7 @@ export function buildSegGrid(segs: Seg[], cell = 4): SegGrid {
     const c1 = clampCol(Math.floor((Math.max(s.ax, s.bx) - minX) / cell))
     const r0 = clampRow(Math.floor((Math.min(s.ay, s.by) - minY) / cell))
     const r1 = clampRow(Math.floor((Math.max(s.ay, s.by) - minY) / cell))
-    for (let r = r0; r <= r1; r++)
-      for (let c = c0; c <= c1; c++) buckets[r * cols + c]!.push(i)
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) buckets[r * cols + c]!.push(i)
   }
   return { segs, cell, cols, rows, minX, minY, buckets }
 }
@@ -78,11 +76,7 @@ function nearbySegIndices(grid: SegGrid, cu: number, cv: number, r: number): num
 }
 
 // 點到線段最短距離平方 + 最近點（給滑行用）。
-function distSqToSeg(
-  px: number,
-  py: number,
-  s: Seg,
-): { d2: number; nx: number; ny: number } {
+function distSqToSeg(px: number, py: number, s: Seg): { d2: number; nx: number; ny: number } {
   const abx = s.bx - s.ax
   const aby = s.by - s.ay
   const apx = px - s.ax
@@ -152,8 +146,8 @@ function blockingNormals(
   for (const i of nearbySegIndices(grid, cu, cv, reach)) {
     const { d2, nx, ny } = distSqToSeg(cu, cv, grid.segs[i]!)
     if (d2 < reach2) {
-      let dx = cu - nx
-      let dy = cv - ny
+      const dx = cu - nx
+      const dy = cv - ny
       const m = Math.hypot(dx, dy)
       if (m > 1e-9) {
         out.push([dx / m, dy / m])
@@ -165,11 +159,7 @@ function blockingNormals(
 
 // 把位移向量對所有受阻法線做「剔除壓入牆分量」投影（內角=多法線逐一剔除）。
 // 反覆 2 趟讓多法線收斂（剔第一條後可能又壓入第二條）。
-function slideVector(
-  du: number,
-  dv: number,
-  normals: Array<[number, number]>,
-): [number, number] {
+function slideVector(du: number, dv: number, normals: Array<[number, number]>): [number, number] {
   let vx = du
   let vy = dv
   for (let pass = 0; pass < 2; pass++) {
@@ -226,7 +216,7 @@ export function stepCirclePoly(
 
   // 受阻：在「起點」取受阻法線（含 R+SKIN 範圍，故貼牆休息也抓得到）
   const normals = blockingNormals(grid, cu, cv, r)
-  let [sx, sy] = slideVector(dcu, dcv, normals)
+  const [sx, sy] = slideVector(dcu, dcv, normals)
 
   // 死角：切線分量幾乎為零（兩面牆夾死）→ 停住
   if (sx * sx + sy * sy < 1e-12) {

@@ -46,9 +46,9 @@ let touchStartY = 0
 let didPinch = false
 
 const stepMessages: Record<number, string> = {
-  1: '步驟 1／3　點擊走廊路面（可點多個不同顏色的走廊，點完按「下一步」）',
-  2: '步驟 2／3　點擊起點',
-  3: '步驟 3／3　點擊終點',
+  1: '點擊地圖上的走廊路面採樣路色（可點多個顏色）',
+  2: '點擊地圖標記起點',
+  3: '點擊地圖標記終點',
   4: '標記完成',
 }
 
@@ -288,7 +288,7 @@ function processImageFile(file: File) {
   selectedFileName.value = file.name
 
   resetAll()
-  statusMessage.value = '讀取中...'
+  statusMessage.value = '讀取中…'
 
   const reader = new FileReader()
   reader.onload = (e) => {
@@ -493,11 +493,11 @@ const goToProcess = () => router.push('/path')
 const ctaLabel = computed(() => {
   if (selectionStep.value === 1)
     return seedPoints.value.length
-      ? `下一步:標記起點(已點 ${seedPoints.value.length} 個)`
+      ? `下一步：標記起點（已點 ${seedPoints.value.length} 個）`
       : '請先點選走廊路面'
   if (selectionStep.value === 2) return '請在地圖上點選起點'
   if (selectionStep.value === 3) return '請在地圖上點選終點'
-  return '下一步:路徑識別'
+  return '下一步：路徑識別'
 })
 
 const ctaEnabled = computed(
@@ -541,7 +541,7 @@ function onCtaClick() {
         {{ stepMessages[selectionStep] }}
       </div>
       <div class="hint-bar hint-bar--done" v-else-if="selectionStep === 4">
-        標記完成,可前往路徑識別
+        標記完成，可前往路徑識別
       </div>
 
       <div class="canvas-shell">
@@ -602,11 +602,11 @@ function onCtaClick() {
               class="substep-main"
               type="button"
               :disabled="selectionStep <= 1"
-              title="重新標記走廊路面(會清除所有標記)"
+              title="重新標記走廊路面（會清除所有標記）"
               @click="resetAll"
             >
               <span class="substep-dot" aria-hidden="true"></span>
-              點選走廊路面(可點多個)
+              點選走廊路面（可點多個）
               <RotateCcw
                 v-if="selectionStep > 1"
                 class="substep-redo"
@@ -1077,15 +1077,26 @@ canvas {
     max-height: 62dvh;
   }
 
+  /* inline 渲染時與上方預覽區保持間距 */
+  .controls {
+    margin-top: var(--space-4);
+  }
+
   .drop-zone {
     min-height: min(420px, 58dvh);
   }
 
+  /* 貼底實底工具列:半透明底+模糊,捲動時內容從後方通過不透字 */
   .flow-actions {
     position: sticky;
-    bottom: var(--space-3);
+    bottom: 0;
     z-index: 5;
     margin-top: var(--space-2);
+    margin-inline: calc(-1 * var(--space-4));
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    background: color-mix(in srgb, var(--color-bg-page) 92%, transparent);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
 }
 </style>

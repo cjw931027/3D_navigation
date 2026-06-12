@@ -35,8 +35,8 @@ function onInput(e: Event) {
           >?</span
         >
         <div class="tooltip-box" v-if="tooltip && showTip">
-          <p><strong>什麼情況調整:</strong>{{ tooltip.problem }}</p>
-          <p><strong>如何調整:</strong>{{ tooltip.fix }}</p>
+          <p><strong>什麼情況調整：</strong>{{ tooltip.problem }}</p>
+          <p><strong>如何調整：</strong>{{ tooltip.fix }}</p>
         </div>
       </span>
       <strong class="param-value">{{ modelValue }}</strong>
