@@ -38,12 +38,17 @@ __screenshots__/
 # Vite
 *.timestamp-*-*.mjs
 
+# 本機開發記錄,不公開
 change-records/*
 
 .claude/
 
+# 測試用平面圖多取自官方網站,版權考量不納入版控(請自備)
 test_maps
 
 tests
 
+# 演算法原型與驗證腳本,僅本機使用
 harness
+
+LICENSE
