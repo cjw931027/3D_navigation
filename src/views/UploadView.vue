@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { ref, shallowRef, onMounted, onUnmounted, toRaw, nextTick } from 'vue'
+import { computed, ref, shallowRef, onMounted, onUnmounted, toRaw, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { FileImage, UploadCloud } from 'lucide-vue-next'
+import { FileImage, RotateCcw, UploadCloud, ZoomOut } from 'lucide-vue-next'
 import { useMapStore } from '@/stores/mapStore'
+import { useIsDesktop } from '@/composables/useBreakpoint'
 
 const mapStore = useMapStore()
 const router = useRouter()
+
+// 桌面時控制面板 Teleport 到 App.vue 側欄的 #shell-panel;手機 inline 渲染。
+const isDesktop = useIsDesktop()
 
 const mapCanvas = ref<HTMLCanvasElement | null>(null)
 const canvasWrapper = ref<HTMLDivElement | null>(null)
@@ -484,116 +488,202 @@ function resetZoom() {
 }
 
 const goToProcess = () => router.push('/path')
+
+// 單一情境式 CTA:步驟 1 推進到起點標記、全部完成後前往路徑識別,中間步驟顯示指引並反灰。
+const ctaLabel = computed(() => {
+  if (selectionStep.value === 1)
+    return seedPoints.value.length
+      ? `下一步:標記起點(已點 ${seedPoints.value.length} 個)`
+      : '請先點選走廊路面'
+  if (selectionStep.value === 2) return '請在地圖上點選起點'
+  if (selectionStep.value === 3) return '請在地圖上點選終點'
+  return '下一步:路徑識別'
+})
+
+const ctaEnabled = computed(
+  () => (selectionStep.value === 1 && seedPoints.value.length > 0) || selectionStep.value === 4,
+)
+
+function onCtaClick() {
+  if (selectionStep.value === 1) finishSeeds()
+  else if (selectionStep.value === 4) goToProcess()
+}
 </script>
 
 <template>
-  <main class="upload-container">
-    <h2>上傳地圖</h2>
-    <p class="status">{{ statusMessage }}</p>
-
-    <!-- 步驟條 -->
-    <div class="steps-bar" v-if="selectionStep > 0">
-      <div class="step" :class="{ active: selectionStep >= 1, done: selectionStep > 1 }">
-        任意可行走區域
-      </div>
-      <div class="step-sep">—</div>
-      <div class="step" :class="{ active: selectionStep >= 2, done: selectionStep > 2 }">起點</div>
-      <div class="step-sep">—</div>
-      <div class="step" :class="{ active: selectionStep >= 3, done: selectionStep > 3 }">終點</div>
-    </div>
-
-    <!-- 步驟提示 + 按鈕列 -->
-    <div class="action-bar" v-if="selectionStep > 0">
-      <span class="step-msg">{{ stepMessages[selectionStep] }}</span>
-      <div class="btn-group">
-        <button
-          v-if="selectionStep === 1"
-          class="btn-sm btn-sm--primary"
-          :disabled="!seedPoints.length"
-          @click="finishSeeds"
-        >
-          下一步：標記起點（已點 {{ seedPoints.length }} 個）
-        </button>
-        <button
-          v-if="selectionStep === 1 && seedPoints.length"
-          class="btn-sm"
-          @click="undoLastSeed"
-        >
-          復原種子
-        </button>
-        <button v-if="selectionStep > 2" class="btn-sm" @click="resetStartEnd">重設起訖點</button>
-        <button v-if="selectionStep > 1" class="btn-sm" @click="resetAll">全部重設</button>
-        <button v-if="scale > 1.05" class="btn-sm" @click="resetZoom">重置縮放</button>
-      </div>
-    </div>
-
-    <!-- 路色預覽（多種子）-->
-    <div class="color-row" v-if="mapStore.pathColors.length">
-      <div class="color-chip" v-for="(c, i) in mapStore.pathColors" :key="i">
-        <span class="swatch" :style="{ background: `rgb(${c.r},${c.g},${c.b})` }"></span>
-        rgb({{ c.r }}, {{ c.g }}, {{ c.b }})
-      </div>
-    </div>
-    <div
-      class="upload-card"
-      :class="{
-        'upload-card--active': mapStore.imageRawData,
-        'upload-card--dragging': isDraggingFile,
-      }"
+  <main class="upload-page">
+    <!-- 空狀態:大虛線拖放區(mockup 樣式),整區可點擊或拖放上傳 -->
+    <label
+      v-if="mapStore.mapWidth === 0"
+      class="drop-zone"
+      :class="{ 'drop-zone--dragging': isDraggingFile }"
       @dragenter.prevent="isDraggingFile = true"
       @dragover.prevent="isDraggingFile = true"
       @dragleave.prevent="handleDragLeave"
       @drop.prevent="handleFileDrop"
     >
-      <div class="upload-card-icon" aria-hidden="true">
-        <UploadCloud :size="30" :stroke-width="1.75" />
-      </div>
-      <div class="upload-card-copy">
-        <strong>{{ mapStore.imageRawData ? '已載入平面圖' : '選擇室內平面圖' }}</strong>
-        <span>
-          {{
-            selectedFileName ||
-            (mapStore.imageRawData ? statusMessage : '支援 PNG、JPG，建議使用清晰平面圖')
-          }}
-        </span>
-      </div>
-      <label class="upload-file-button">
-        <input
-          class="visually-hidden"
-          type="file"
-          accept="image/png, image/jpeg"
-          @change="handleFileUpload"
-        />
-        選擇檔案
-      </label>
-    </div>
+      <input
+        class="visually-hidden"
+        type="file"
+        accept="image/png, image/jpeg"
+        @change="handleFileUpload"
+      />
+      <span class="drop-icon" aria-hidden="true">
+        <UploadCloud :size="32" :stroke-width="2" />
+      </span>
+      <strong class="drop-title">上傳平面圖以進行後續操作</strong>
+      <span class="drop-sub">點擊框框中的任何位置進行上傳<br />支援 PNG、JPG</span>
+    </label>
 
-    <!-- Canvas 區域 -->
-    <div
-      ref="canvasWrapper"
-      class="canvas-wrapper"
-      :class="{
-        locked: selectionStep === 4 || selectionStep === 0,
-        empty: mapStore.mapWidth === 0,
-      }"
-    >
-      <div v-if="mapStore.mapWidth === 0" class="canvas-empty">
-        <FileImage :size="44" :stroke-width="1.5" />
-        <span>上傳後會在這裡預覽地圖</span>
+    <!-- 預覽區:canvas 常駐掛載(v-show),上傳繪製與 touch 監聽都依賴它存在 -->
+    <section class="preview-pane" v-show="mapStore.mapWidth > 0">
+      <div class="hint-bar" v-if="selectionStep > 0 && selectionStep < 4">
+        {{ stepMessages[selectionStep] }}
       </div>
-      <canvas
-        v-show="mapStore.mapWidth > 0"
-        ref="mapCanvas"
-        :style="{
-          transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
-          transformOrigin: 'center center',
-          cursor: selectionStep > 0 && selectionStep < 4 ? 'crosshair' : 'default',
-        }"
-        @click="handleCanvasClick"
-        @mousemove="handleMouseMove"
-        @mouseleave="handleMouseLeave"
-      ></canvas>
-    </div>
+      <div class="hint-bar hint-bar--done" v-else-if="selectionStep === 4">
+        標記完成,可前往路徑識別
+      </div>
+
+      <div class="canvas-shell">
+        <div
+          ref="canvasWrapper"
+          class="canvas-wrapper"
+          :class="{ locked: selectionStep === 4 || selectionStep === 0 }"
+        >
+          <canvas
+            v-show="mapStore.mapWidth > 0"
+            ref="mapCanvas"
+            :style="{
+              transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
+              transformOrigin: 'center center',
+              cursor: selectionStep > 0 && selectionStep < 4 ? 'crosshair' : 'default',
+            }"
+            @click="handleCanvasClick"
+            @mousemove="handleMouseMove"
+            @mouseleave="handleMouseLeave"
+          ></canvas>
+        </div>
+
+        <!-- 浮動縮放重置:只在放大時出現,貼著地圖不佔面板空間 -->
+        <button v-if="scale > 1.05" class="zoom-reset" type="button" @click="resetZoom">
+          <ZoomOut :size="14" aria-hidden="true" />
+          重置縮放
+        </button>
+      </div>
+    </section>
+
+    <!-- 控制面板:桌面投送到側欄,手機 inline 在預覽下方 -->
+    <Teleport to="#shell-panel" :disabled="!isDesktop" defer>
+      <div class="controls" v-if="mapStore.mapWidth > 0">
+        <!-- 檔案資訊卡 -->
+        <div class="file-card">
+          <span class="file-icon" aria-hidden="true">
+            <FileImage :size="18" :stroke-width="2" />
+          </span>
+          <div class="file-meta">
+            <strong>{{ selectedFileName || '已載入平面圖' }}</strong>
+            <span>{{ statusMessage }}</span>
+          </div>
+          <label class="btn btn--ghost file-rebtn">
+            <input
+              class="visually-hidden"
+              type="file"
+              accept="image/png, image/jpeg"
+              @change="handleFileUpload"
+            />
+            重新上傳
+          </label>
+        </div>
+
+        <!-- 標記子步驟:點擊已完成的列可重新標記該步驟(取代「全部重設 / 重設起訖點」按鈕) -->
+        <div class="substeps" aria-label="標記進度">
+          <div class="substep" :class="{ active: selectionStep === 1, done: selectionStep > 1 }">
+            <button
+              class="substep-main"
+              type="button"
+              :disabled="selectionStep <= 1"
+              title="重新標記走廊路面(會清除所有標記)"
+              @click="resetAll"
+            >
+              <span class="substep-dot" aria-hidden="true"></span>
+              點選走廊路面(可點多個)
+              <RotateCcw
+                v-if="selectionStep > 1"
+                class="substep-redo"
+                :size="13"
+                aria-hidden="true"
+              />
+            </button>
+            <button
+              v-if="selectionStep === 1 && seedPoints.length"
+              class="substep-chip"
+              type="button"
+              title="復原最後一個種子"
+              @click="undoLastSeed"
+            >
+              <RotateCcw :size="12" aria-hidden="true" />
+              復原
+            </button>
+          </div>
+          <div class="substep" :class="{ active: selectionStep === 2, done: selectionStep > 2 }">
+            <button
+              class="substep-main"
+              type="button"
+              :disabled="selectionStep <= 2"
+              title="重新標記起點與終點"
+              @click="resetStartEnd"
+            >
+              <span class="substep-dot" aria-hidden="true"></span>
+              點選起點
+              <RotateCcw
+                v-if="selectionStep > 2"
+                class="substep-redo"
+                :size="13"
+                aria-hidden="true"
+              />
+            </button>
+          </div>
+          <div class="substep" :class="{ active: selectionStep === 3, done: selectionStep > 3 }">
+            <button
+              class="substep-main"
+              type="button"
+              :disabled="selectionStep <= 3"
+              title="重新標記起點與終點"
+              @click="resetStartEnd"
+            >
+              <span class="substep-dot" aria-hidden="true"></span>
+              點選終點
+              <RotateCcw
+                v-if="selectionStep > 3"
+                class="substep-redo"
+                :size="13"
+                aria-hidden="true"
+              />
+            </button>
+          </div>
+        </div>
+
+        <!-- 路色預覽(多種子) -->
+        <div class="color-row" v-if="mapStore.pathColors.length">
+          <div class="color-chip" v-for="(c, i) in mapStore.pathColors" :key="i">
+            <span class="swatch" :style="{ background: `rgb(${c.r},${c.g},${c.b})` }"></span>
+            rgb({{ c.r }}, {{ c.g }}, {{ c.b }})
+          </div>
+        </div>
+
+        <!-- 單一情境式 CTA:依目前子步驟推進流程 -->
+        <div class="flow-actions">
+          <button
+            class="btn btn--primary btn--pill"
+            type="button"
+            :disabled="!ctaEnabled"
+            @click="onCtaClick"
+          >
+            {{ ctaLabel }}
+          </button>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- 放大鏡 -->
     <teleport to="body">
@@ -606,125 +696,337 @@ const goToProcess = () => router.push('/path')
         :style="{ left: magnifierPos.x + 'px', top: magnifierPos.y + 'px' }"
       ></canvas>
     </teleport>
-
-    <!-- 完成後 -->
-    <div v-if="selectionStep === 4" class="next-section">
-      <button class="btn-primary" @click="goToProcess">下一步：路徑識別</button>
-    </div>
   </main>
 </template>
 
 <style scoped>
-.upload-container {
-  max-width: 900px;
+.upload-page {
+  max-width: 1100px;
   margin: 0 auto;
-  padding: var(--space-5);
-  text-align: center;
 }
 
-h2 {
-  font-size: var(--text-h2);
-  font-weight: var(--font-bold);
-  color: var(--color-text);
-  margin-bottom: var(--space-2);
-}
-
-.status {
-  color: var(--color-text-muted);
-  font-size: var(--text-base);
-  margin-bottom: var(--space-3);
-}
-
-/* 步驟條 */
-.steps-bar {
+/* ── 虛線拖放區(空狀態)──────────────────────────────────── */
+.drop-zone {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  margin: var(--space-3) 0;
-}
-
-.step {
-  padding: var(--space-1) var(--space-4);
-  border-radius: var(--radius-pill);
-  background: var(--color-bg-neutral);
-  color: var(--color-text-faded);
-  font-size: var(--text-base);
-  font-weight: var(--font-semibold);
-  transition: 0.2s;
-}
-
-.step.active {
-  background: var(--color-info-bg);
-  color: var(--color-primary);
-}
-.step.done {
-  background: var(--color-success-bg);
-  color: var(--color-success-text);
-}
-.step-sep {
-  color: var(--color-text-tick);
-  font-size: var(--text-base);
-}
-
-/* 操作列 */
-.action-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: var(--space-2) 0 var(--space-3);
-}
-
-.step-msg {
-  font-size: var(--text-base);
-  color: var(--color-text-tertiary);
-  font-weight: var(--font-medium);
-}
-
-.btn-group {
-  display: flex;
-  gap: 5px;
-}
-
-.btn-sm {
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-text-hint);
-  border-radius: var(--radius-sm);
+  gap: var(--space-3);
+  min-height: min(520px, 64dvh);
+  padding: var(--space-8) var(--space-5);
+  box-sizing: border-box;
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-soft);
   cursor: pointer;
-  color: var(--color-text-soft);
-  transition: background 0.15s;
-  touch-action: manipulation;
+  text-align: center;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
 }
-.btn-sm:hover {
+
+.drop-zone:hover,
+.drop-zone:focus-within {
+  border-color: var(--color-primary);
   background: var(--color-bg-hover);
 }
 
-/* 種子標記完成的主要按鈕：較醒目，引導使用者前進 */
-.btn-sm--primary {
-  background: var(--gradient-primary);
-  color: var(--color-white);
-  border-color: transparent;
-}
-.btn-sm--primary:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-.btn-sm--primary:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.drop-zone--dragging {
+  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
+  box-shadow: 0 0 0 4px var(--color-primary-ring);
 }
 
-/* 路色預覽（多種子→多 chip，需換行置中）*/
+.drop-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-lg);
+  background: var(--color-primary);
+  color: var(--color-white);
+  margin-bottom: var(--space-2);
+}
+
+.drop-title {
+  font-size: var(--text-md);
+  font-weight: var(--font-semibold);
+  color: var(--color-text);
+}
+
+.drop-sub {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  line-height: 1.7;
+}
+
+/* ── 預覽區 ─────────────────────────────────────────────── */
+.hint-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-info-bg);
+  color: var(--color-info-text);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  line-height: 1.5;
+}
+
+.hint-bar--done {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.canvas-shell {
+  position: relative;
+}
+
+/* 浮動縮放重置:玻璃感小藥丸,貼著地圖右上角 */
+.zoom-reset {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.zoom-reset:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+/* Canvas wrapper
+   使用 flex 讓圖片在容器中置中;不設 max-height 截斷,讓圖片完整顯示後再可捲動 */
+.canvas-wrapper {
+  position: relative;
+  overflow: auto; /* 圖片超出時可捲動,不裁切 */
+  min-height: 320px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-soft);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.canvas-wrapper.locked {
+  opacity: 0.88;
+}
+
+canvas {
+  display: block;
+  /* 寬度自適應容器,高度等比縮放,圖片完整顯示 */
+  max-width: 100%;
+  height: auto;
+  background: white;
+  will-change: transform;
+}
+
+/* 放大鏡 */
+:global(.magnifier) {
+  position: fixed;
+  pointer-events: none;
+  border-radius: var(--radius-circle);
+  border: 2px solid var(--color-text-soft);
+  box-shadow: var(--shadow-magnifier);
+  z-index: 9999;
+  background: var(--color-bg-card);
+}
+
+/* ── 控制面板(桌面 teleport 到側欄 / 手機 inline)────────── */
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  text-align: left;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+}
+
+.file-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: var(--radius-md);
+  background: var(--color-info-bg);
+  color: var(--color-primary);
+}
+
+.file-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-meta strong {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta span {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.file-rebtn {
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* 標記子步驟 checklist */
+.substeps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-soft);
+}
+
+.substep {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* 子步驟列本體:已完成時可點擊重做,hover 提示 */
+.substep-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2));
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.substep-main:not(:disabled) {
+  cursor: pointer;
+}
+.substep-main:not(:disabled):hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.substep-redo {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--color-text-faded);
+}
+.substep-main:not(:disabled):hover .substep-redo {
+  color: var(--color-primary);
+}
+
+/* 復原最後一個種子的小 chip(只在標記種子時出現) */
+.substep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  min-height: 26px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-text-soft);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.substep-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.substep-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  box-sizing: border-box;
+  border-radius: var(--radius-circle);
+  border: 2px solid var(--color-border);
+  background: transparent;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out);
+}
+
+.substep.active {
+  color: var(--color-text);
+  font-weight: var(--font-semibold);
+}
+.substep.active .substep-dot {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.substep.done {
+  color: var(--color-success-text);
+}
+.substep.done .substep-dot {
+  border-color: var(--color-success);
+  background: var(--color-success);
+}
+
+/* 路色 chips */
 .color-row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  justify-content: center;
-  margin-bottom: var(--space-3);
 }
 
 .color-chip {
@@ -748,492 +1050,42 @@ h2 {
   flex-shrink: 0;
 }
 
-/* 上傳 */
-.upload-card {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-4);
-  max-width: 620px;
-  margin: var(--space-4) auto var(--space-5);
-  padding: var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-white);
-  box-shadow: var(--shadow-sm);
-  text-align: left;
-  transition:
-    border-color var(--dur-base) var(--ease-out),
-    box-shadow var(--dur-base) var(--ease-out),
-    background-color var(--dur-base) var(--ease-out),
-    transform var(--dur-base) var(--ease-out);
-}
-
-.upload-card:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
-}
-
-.upload-card--active {
-  border-color: var(--color-primary);
-}
-
-.upload-card--dragging {
-  border-color: var(--color-primary);
-  background: var(--color-info-bg);
-  box-shadow: 0 0 0 4px var(--color-primary-ring);
-}
-
-.upload-card-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 52px;
-  height: 52px;
-  border-radius: var(--radius-circle);
-  background: var(--color-info-bg);
-  color: var(--color-primary);
-  flex-shrink: 0;
-}
-
-.upload-card-copy {
+.flow-actions {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  min-width: 0;
+  gap: var(--space-2);
 }
 
-.upload-card-copy strong {
-  color: var(--color-text);
-  font-size: var(--text-md);
-  font-weight: var(--font-semibold);
-}
-
-.upload-card-copy span {
-  overflow: hidden;
-  color: var(--color-text-muted);
-  font-size: var(--text-base);
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.upload-file-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: var(--space-2) var(--space-5);
-  border-radius: var(--radius-md);
-  background: var(--gradient-primary);
-  color: var(--color-white);
-  font-size: var(--text-base);
-  font-weight: var(--font-semibold);
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition:
-    filter var(--dur-fast) var(--ease-out),
-    transform var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
-  touch-action: manipulation;
-  white-space: nowrap;
-}
-
-.upload-file-button:hover {
-  background: var(--gradient-primary-hover);
-  filter: brightness(1.05);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-.upload-file-button:active {
-  transform: translateY(0) scale(0.98);
-}
-
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-
-/* Canvas wrapper
-   使用 flex + align-items:center 讓圖片在容器中置中
-   不設 max-height 截斷，讓圖片完整顯示後再可捲動 */
-.canvas-wrapper {
-  position: relative;
-  overflow: auto; /* 圖片超出時可捲動，不裁切 */
-  min-height: 320px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-bg-card);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  box-shadow: var(--shadow-sm);
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.canvas-wrapper.empty {
-  align-items: center;
-  border-style: dashed;
-  background: var(--color-bg-card);
-}
-
-.canvas-wrapper.locked {
-  opacity: 0.88;
-}
-
-canvas {
-  display: block;
-  /* 寬度自適應容器，高度等比縮放，圖片完整顯示 */
-  max-width: 100%;
-  height: auto;
-  background: white;
-  will-change: transform;
-}
-
-.canvas-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  color: var(--color-text-muted);
-  font-size: var(--text-base);
-  font-weight: var(--font-medium);
-}
-
-/* 放大鏡 */
-:global(.magnifier) {
-  position: fixed;
-  pointer-events: none;
-  border-radius: var(--radius-circle);
-  border: 2px solid var(--color-text-soft);
-  box-shadow: var(--shadow-magnifier);
-  z-index: 9999;
-  background: var(--color-bg-card);
-}
-
-/* 下一步 */
-.next-section {
-  margin-top: var(--space-5);
-}
-
-.btn-primary {
-  min-height: 44px;
-  padding: var(--space-3) var(--space-8);
-  font-size: var(--text-md);
-  font-weight: var(--font-bold);
-  background: var(--gradient-primary);
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition:
-    filter var(--dur-fast) var(--ease-out),
-    transform var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
-  touch-action: manipulation;
-}
-.btn-primary:hover {
-  background: var(--gradient-primary-hover);
-  filter: brightness(1.05);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-.btn-primary:active {
-  transform: translateY(0) scale(0.98);
-}
-
-.next-section {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.landmark-section {
-  display: flex;
-  justify-content: center;
-  margin: var(--space-2) 0;
-}
-
-.btn-secondary {
-  padding: var(--space-3) var(--space-6);
-  font-size: var(--text-md);
-  font-weight: var(--font-semibold);
-  background: var(--color-bg-card);
-  color: var(--color-primary);
-  border: 1px solid var(--color-primary);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  touch-action: manipulation;
-}
-.btn-secondary:hover {
-  background: var(--color-info-bg);
-}
-
-.lm-modal-mask {
-  position: fixed;
-  inset: 0;
-  background: var(--color-overlay);
-  z-index: 9998;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-5);
-}
-
-.lm-modal-box {
-  position: relative;
-  background: var(--color-bg-card);
-  border-radius: var(--radius-lg);
-  padding: var(--space-6) var(--space-5) var(--space-5);
-  max-width: 1000px;
-  width: 100%;
-  max-height: 90vh;
-  overflow: auto;
-}
-
-.lm-modal-close {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: var(--color-bg-neutral);
-  border-radius: var(--radius-circle);
-  cursor: pointer;
-  font-weight: var(--font-bold);
-  color: var(--color-text-soft);
-}
-.lm-modal-close:hover {
-  background: var(--color-border);
-  color: var(--color-danger-dark);
-}
-
-.type-label {
-  color: var(--color-text-muted);
-  font-weight: var(--font-semibold);
-}
-
-.type-badge {
-  padding: 2px var(--space-3);
-  border-radius: var(--radius-pill);
-  font-weight: var(--font-bold);
-  font-size: var(--text-md);
-}
-
-.badge-color {
-  background: var(--color-info-bg);
-  color: var(--color-primary);
-}
-
-.badge-line {
-  background: var(--color-badge-line-bg);
-  color: var(--color-badge-line-text);
-}
-
-.type-ratio {
-  color: var(--color-text-faded);
-}
-
-.type-overridden {
-  color: var(--color-override-text);
-  font-size: var(--text-base);
-}
-
-.type-toggle {
-  display: flex;
-  gap: 4px;
-}
-
-.btn-type {
-  padding: 2px var(--space-3);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-text-hint);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  color: var(--color-text-soft);
-  transition:
-    background 0.15s,
-    border-color 0.15s;
-  touch-action: manipulation;
-}
-
-.btn-type:hover {
-  background: var(--color-bg-hover);
-}
-
-.btn-type.active {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-reset-type {
-  border-color: var(--color-override-text);
-  color: var(--color-override-text);
-}
-
-.btn-reset-type:hover {
-  background: var(--color-override-bg);
-}
-
-@media (max-width: 640px) {
-  .upload-container {
-    padding: var(--space-4) var(--space-2);
-  }
-
-  h2 {
-    margin-bottom: var(--space-1);
-  }
-
-  .status {
-    margin-bottom: var(--space-2);
-  }
-
-  .steps-bar {
-    justify-content: flex-start;
-    overflow-x: auto;
-    padding-bottom: var(--space-1);
-    gap: var(--space-1);
-    scrollbar-width: none;
-  }
-
-  .steps-bar::-webkit-scrollbar {
-    display: none;
-  }
-
-  .step {
-    flex: 0 0 auto;
-    padding: 2px var(--space-2);
-    font-size: var(--text-sm);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .step-sep {
-    flex-shrink: 0;
-  }
-
-  .action-bar {
-    align-items: stretch;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .btn-group {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: var(--space-2);
-  }
-
-  .btn-type {
-    min-height: 40px;
-  }
-
-  .btn-sm {
-    min-height: 36px;
-    padding: var(--space-1) var(--space-2);
-    font-size: var(--text-xs);
-  }
-
-  .step-msg {
-    line-height: 1.45;
-  }
-
-  .action-bar:has(.btn-group:empty) .step-msg {
-    padding: var(--space-2) var(--space-4);
-    background: var(--color-success-bg);
-    color: var(--color-success-text);
-    border-radius: var(--radius-pill);
-    font-weight: var(--font-semibold);
-  }
-
-  .type-toggle {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-2);
-  }
-
-  .upload-card {
-    grid-template-columns: auto 1fr;
-    gap: var(--space-3);
-    margin: var(--space-3) auto var(--space-4);
-    padding: var(--space-3);
-    border-radius: var(--radius-md);
+/* 桌面:控制面板撐滿側欄剩餘高度,CTA 固定在底部。 */
+@media (min-width: 900px) {
+  .controls {
+    flex: 1 0 auto;
     box-sizing: border-box;
-    max-width: 100%;
+    padding-bottom: var(--space-2);
   }
 
-  .upload-card-icon {
-    width: 44px;
-    height: 44px;
+  .flow-actions {
+    margin-top: auto;
+    padding-top: var(--space-4);
   }
+}
 
-  .upload-card-copy strong {
-    font-size: var(--text-base);
-  }
-
-  .upload-card-copy span {
-    white-space: normal;
-  }
-
-  .upload-file-button {
-    grid-column: 1 / -1;
-    width: 100%;
-    min-height: 44px;
-    box-sizing: border-box;
-  }
-
+/* 手機:CTA sticky 在底部(mockup 的大藥丸按鈕)。 */
+@media (max-width: 899.98px) {
   .canvas-wrapper {
     min-height: 260px;
     max-height: 62dvh;
-    border-radius: var(--radius-md);
   }
 
-  .canvas-empty {
-    padding: var(--space-5);
-    text-align: center;
+  .drop-zone {
+    min-height: min(420px, 58dvh);
   }
 
-  .next-section {
+  .flow-actions {
     position: sticky;
     bottom: var(--space-3);
     z-index: 5;
-    margin-top: var(--space-4);
-  }
-
-  .btn-primary,
-  .btn-secondary {
-    width: 100%;
-    min-height: 46px;
-  }
-
-  .lm-modal-mask {
-    align-items: flex-end;
-    padding: var(--space-3);
-  }
-
-  .lm-modal-box {
-    max-height: 82dvh;
-    padding: var(--space-5) var(--space-4) var(--space-4);
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  }
-}
-
-@media (max-width: 380px) {
-  .upload-container {
-    padding-inline: 0;
+    margin-top: var(--space-2);
   }
 }
 </style>
