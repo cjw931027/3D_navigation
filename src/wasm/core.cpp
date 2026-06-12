@@ -203,7 +203,21 @@ static constexpr float FAINT_FRAME_MIN_SPAN_FRAC = 0.2f; // 圖框級：maxSpan 
 static constexpr int   CORE_DARK_THRESHOLD      = 130;  // 字芯/牆芯核心深色門檻（鏈像素多在 130~170）
 static constexpr int   CARVE_FRINGE_DIST        = 2;    // 中間調像素距「保留牆芯」≤ 此距離才保留
 static constexpr int   GLYPH_GROUP_GAP          = 8;    // 筆畫聚類：子元件 bbox 間距 ≤ 此值視為同一字
-static constexpr int   GLYPH_GROUP_MIN_WALL_DIST = 6;   // 群像素距長牆芯 > 此值才雕（門齒貼牆 → 保留）
+static constexpr float GLYPH_GROUP_MIN_FILL     = 0.15f;// 群整體填充率下限（亖類橫槓稀疏，比單元件 0.3 寬）
+static constexpr int   GLYPH_GROUP_MIN_PIECE    = 8;    // 參與聚類的子元件最小像素數（AA 碎屑會鏈式串接拉長群）
+// 彩色墨水字：深色但高彩度（如三樓「等候區」紫字 chroma 31~40）不進 isDark 層，需獨立分析。
+// 房間內彩色標題被標成字後是室內孤島，種子 BFS 自然丟棄，不會誤通。
+static constexpr int   COLOR_INK_MAX_BRI        = 150;  // 彩色墨水亮度上限（淺粉彩填色 bri 169+ 不會中）
+
+// === 洞分類的兩個守衛（誤翻防護）===
+// 環狀守衛：洞若「內部包大片可走」（如 B1 紫色店面塊內的白標籤字把塊掏成薄環）= 房間/
+// 店面輪廓而非文字，不翻。粉彩守衛：亮的粉彩填色（chroma 26~80 且 bri≥150）= 店面色塊，
+// 不翻；深色彩字（等候區紫字 bri~110）不受此限。
+static constexpr int   RING_MIN_INTERIOR        = 50;
+static constexpr float RING_MIN_INTERIOR_FRAC   = 0.2f;
+static constexpr int   PASTEL_CHROMA_MIN        = 26;
+static constexpr int   PASTEL_CHROMA_MAX        = 80;
+static constexpr int   PASTEL_MIN_BRI           = 150;
 
 // 前向宣告（定義在洞分類區塊）。
 std::vector<int> computeObstacleThickness(const std::vector<uint8_t>& mask, int width, int height);
@@ -224,10 +238,15 @@ struct WallComponentStat {
 // 混合牆元件的字芯雕除：命中牆規則的元件內，用 CORE_DARK_THRESHOLD 重新分段；
 // 符合字塊特徵（GLYPH_*）的核心子元件 = 被反鋸齒鏈黏進牆網的字 → 連同周圍「不貼牆芯」
 // 的中間調膠水像素一起剔出 wallMask。單獨橫槓（亖）minSpan 過小不過字塊測試 → 短小
-// 子元件依 bbox 鄰近聚成群，群整體符合字塊特徵且離長牆芯夠遠（門齒貼牆不雕）→ 整群雕。
+// 子元件依 bbox 鄰近聚成群（碎屑 <GLYPH_GROUP_MIN_PIECE 不參與，防鏈式串接拉長群），
+// 群整體符合字塊特徵 → 整群雕。
+// glyphMaskOut（可選）：雕掉的像素記錄為「字」，主流程直接設可走（字下面是地板），
+// 不依賴洞分類的包圍條件（種子取色偏移時字洞可能黏進背景大連通塊而翻不了）。
+// 也用於非牆元件（只標記 glyphMask，wallMask 雕除為 no-op）。
 static void carveGlyphCoresFromWallComp(std::vector<uint8_t>& wallMask, const uint8_t* buf,
                                         const std::vector<int>& comp, int width,
-                                        int minX, int minY, int maxX, int maxY) {
+                                        int minX, int minY, int maxX, int maxY,
+                                        std::vector<uint8_t>* glyphMaskOut = nullptr) {
     int bw = maxX - minX + 1, bh = maxY - minY + 1;
     int localTotal = bw * bh;
     auto localOf = [&](int idx) { return (idx / width - minY) * bw + (idx % width) - minX; };
@@ -272,11 +291,12 @@ static void carveGlyphCoresFromWallComp(std::vector<uint8_t>& wallMask, const ui
     }
     std::vector<bool> carveLabel(subs.size());
     for (size_t i = 0; i < subs.size(); i++) carveLabel[i] = subs[i].isGlyph;
-    // 筆畫聚類（union-find，bbox 間距 ≤ GLYPH_GROUP_GAP 合群）
+    // 筆畫聚類（union-find，bbox 間距 ≤ GLYPH_GROUP_GAP 合群；碎屑不參與）
     {
         std::vector<int> shortIds;
         for (size_t i = 0; i < subs.size(); i++)
-            if (!subs[i].isLong && !subs[i].isGlyph) shortIds.push_back((int)i);
+            if (!subs[i].isLong && !subs[i].isGlyph && subs[i].cnt >= GLYPH_GROUP_MIN_PIECE)
+                shortIds.push_back((int)i);
         std::vector<int> parent((int)subs.size());
         for (size_t i = 0; i < parent.size(); i++) parent[i] = (int)i;
         std::function<int(int)> find = [&](int i) {
@@ -292,18 +312,6 @@ static void carveGlyphCoresFromWallComp(std::vector<uint8_t>& wallMask, const ui
                 if (near(shortIds[i], shortIds[j])) parent[find(shortIds[i])] = find(shortIds[j]);
         std::unordered_map<int, std::vector<int>> groups;
         for (int i : shortIds) groups[find(i)].push_back(i);
-        // 長牆芯 bitmap（距離守衛）
-        std::vector<uint8_t> longCore(localTotal, 0);
-        for (int i = 0; i < localTotal; i++)
-            if (core[i] && subs[label[i]].isLong) longCore[i] = 1;
-        auto nearLong = [&](int x, int y) {
-            for (int dy = -GLYPH_GROUP_MIN_WALL_DIST; dy <= GLYPH_GROUP_MIN_WALL_DIST; dy++)
-                for (int dx = -GLYPH_GROUP_MIN_WALL_DIST; dx <= GLYPH_GROUP_MIN_WALL_DIST; dx++) {
-                    int nx = x + dx, ny = y + dy;
-                    if (nx >= 0 && nx < bw && ny >= 0 && ny < bh && longCore[ny * bw + nx]) return true;
-                }
-            return false;
-        };
         for (auto& kv : groups) {
             int x0 = bw, y0 = bh, x1 = -1, y1 = -1, cnt = 0;
             for (int i : kv.second) {
@@ -314,13 +322,7 @@ static void carveGlyphCoresFromWallComp(std::vector<uint8_t>& wallMask, const ui
             int gw = x1 - x0 + 1, gh = y1 - y0 + 1;
             int gMin = std::min(gw, gh), gMax = std::max(gw, gh) - 1;
             if (!(gMin >= GLYPH_MIN_SIDE && gMax < GLYPH_MAX_SPAN
-                  && (float)cnt / (float)(gw * gh) >= GLYPH_MIN_FILL)) continue;
-            bool touchLong = false;
-            int stepY = std::max(1, gh / 4), stepX = std::max(1, gw / 4);
-            for (int y = y0; y <= y1 && !touchLong; y += stepY)
-                for (int x = x0; x <= x1; x += stepX)
-                    if (nearLong(x, y)) { touchLong = true; break; }
-            if (touchLong) continue;
+                  && (float)cnt / (float)(gw * gh) >= GLYPH_GROUP_MIN_FILL)) continue;
             for (int i : kv.second) carveLabel[i] = true;
         }
     }
@@ -348,15 +350,21 @@ static void carveGlyphCoresFromWallComp(std::vector<uint8_t>& wallMask, const ui
         }
     for (int y = 0; y < bh; y++)
         for (int x = 0; x < bw; x++)
-            if (carve[y * bw + x]) wallMask[(y + minY) * width + (x + minX)] = 0;
+            if (carve[y * bw + x]) {
+                int gi = (y + minY) * width + (x + minX);
+                wallMask[gi] = 0;
+                if (glyphMaskOut) (*glyphMaskOut)[gi] = 1;
+            }
 }
 
-// statsOut 為可選，用於除錯與測試輸出。
+// statsOut 為可選，用於除錯與測試輸出。glyphMaskOut 為可選：輸出「字像素」遮罩
+// （字塊護欄元件 + 混合牆元件雕除字芯 + 彩色墨水字），主流程直接設為可走。
 std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
                                               int width, int height,
                                               uint8_t darkThreshold,
                                               int spanThreshold,
-                                              std::vector<WallComponentStat>* statsOut = nullptr) {
+                                              std::vector<WallComponentStat>* statsOut = nullptr,
+                                              std::vector<uint8_t>* glyphMaskOut = nullptr) {
     std::vector<uint8_t> wallMask;
     if (spanThreshold <= 0) return wallMask;
 
@@ -572,7 +580,14 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
         if (isWall) {
             for (int idx : queue) wallMask[idx] = 1;
             // 混合元件字芯雕除：把被反鋸齒鏈黏進牆網的字剔出（真牆核心不動）
-            carveGlyphCoresFromWallComp(wallMask, buf, queue, width, minX, minY, maxX, maxY);
+            carveGlyphCoresFromWallComp(wallMask, buf, queue, width, minX, minY, maxX, maxY, glyphMaskOut);
+        } else if (isGlyph && glyphMaskOut) {
+            // 字塊護欄命中的獨立字元件：直接記錄為字（主流程設可走），不依賴洞分類
+            for (int idx : queue) (*glyphMaskOut)[idx] = 1;
+        } else if (glyphMaskOut) {
+            // 非牆非字元件（如「區+亖+碎屑」黏成 >80px 的暗色塊）：同樣跑字芯聚類，
+            // 只標記 glyphMask（wallMask 本來就 0，雕除是 no-op）
+            carveGlyphCoresFromWallComp(wallMask, buf, queue, width, minX, minY, maxX, maxY, glyphMaskOut);
         }
 
         if (statsOut) {
@@ -586,13 +601,101 @@ std::vector<uint8_t> buildWallMaskFromBuffer(const uint8_t* buf,
         }
     }
 
+    // 彩色墨水字分析：深色高彩度像素（chroma ≥ 30 進不了 isDark 層，如三樓「等候區」紫字）
+    // 獨立連通 → 字塊測試（單元件 + 聚類）→ glyphMask。
+    if (glyphMaskOut) {
+        std::vector<uint8_t> isInk(total, 0);
+        for (int i = 0; i < total; i++) {
+            int r = buf[i*4], g = buf[i*4+1], b = buf[i*4+2];
+            int brightness = (r + g + b) / 3;
+            int chroma = std::max({r, g, b}) - std::min({r, g, b});
+            if (brightness < COLOR_INK_MAX_BRI && chroma >= WALL_DARK_CHROMA_MAX) isInk[i] = 1;
+        }
+        struct InkComp { int x0, y0, x1, y1, cnt; bool isGlyph, isLong; std::vector<int> pix; };
+        std::vector<InkComp> inkComps;
+        std::vector<bool> iv(total, false);
+        std::vector<int> iq;
+        iq.reserve(512);
+        for (int start = 0; start < total; start++) {
+            if (!isInk[start] || iv[start]) continue;
+            iq.clear();
+            iq.push_back(start);
+            iv[start] = true;
+            int minX = start % width, maxX = minX;
+            int minY = start / width, maxY = minY;
+            int head = 0;
+            while (head < (int)iq.size()) {
+                int cur = iq[head++];
+                int cx = cur % width, cy = cur / width;
+                if (cx < minX) minX = cx;
+                if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy;
+                if (cy > maxY) maxY = cy;
+                for (int d = 0; d < 8; d++) {
+                    int nx = cx + dx8[d], ny = cy + dy8[d];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int ni = ny * width + nx;
+                    if (!iv[ni] && isInk[ni]) { iv[ni] = true; iq.push_back(ni); }
+                }
+            }
+            int bw2 = maxX - minX + 1, bh2 = maxY - minY + 1;
+            int gMin = std::min(bw2, bh2), gMax = std::max(bw2, bh2) - 1;
+            InkComp c;
+            c.x0 = minX; c.y0 = minY; c.x1 = maxX; c.y1 = maxY;
+            c.cnt = (int)iq.size();
+            c.isGlyph = gMin >= GLYPH_MIN_SIDE && gMax < GLYPH_MAX_SPAN
+                     && (float)c.cnt / (float)(bw2 * bh2) >= GLYPH_MIN_FILL;
+            c.isLong = gMax >= GLYPH_MAX_SPAN;
+            c.pix = iq;
+            inkComps.push_back(std::move(c));
+        }
+        for (auto& c : inkComps)
+            if (c.isGlyph) for (int idx : c.pix) (*glyphMaskOut)[idx] = 1;
+        // 聚類：短小非字墨水元件合群再測（與字芯聚類同邏輯；碎屑不參與）
+        std::vector<int> shortIds;
+        for (size_t i = 0; i < inkComps.size(); i++)
+            if (!inkComps[i].isLong && !inkComps[i].isGlyph && inkComps[i].cnt >= GLYPH_GROUP_MIN_PIECE)
+                shortIds.push_back((int)i);
+        std::vector<int> parent((int)inkComps.size());
+        for (size_t i = 0; i < parent.size(); i++) parent[i] = (int)i;
+        std::function<int(int)> find = [&](int i) {
+            while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+            return i;
+        };
+        auto nearC = [&](int a, int b) {
+            return inkComps[a].x0 <= inkComps[b].x1 + GLYPH_GROUP_GAP && inkComps[b].x0 <= inkComps[a].x1 + GLYPH_GROUP_GAP
+                && inkComps[a].y0 <= inkComps[b].y1 + GLYPH_GROUP_GAP && inkComps[b].y0 <= inkComps[a].y1 + GLYPH_GROUP_GAP;
+        };
+        for (size_t i = 0; i < shortIds.size(); i++)
+            for (size_t j = i + 1; j < shortIds.size(); j++)
+                if (nearC(shortIds[i], shortIds[j])) parent[find(shortIds[i])] = find(shortIds[j]);
+        std::unordered_map<int, std::vector<int>> groups;
+        for (int i : shortIds) groups[find(i)].push_back(i);
+        for (auto& kv : groups) {
+            int x0 = width, y0 = height, x1 = -1, y1 = -1, cnt = 0;
+            for (int i : kv.second) {
+                x0 = std::min(x0, inkComps[i].x0); y0 = std::min(y0, inkComps[i].y0);
+                x1 = std::max(x1, inkComps[i].x1); y1 = std::max(y1, inkComps[i].y1);
+                cnt += inkComps[i].cnt;
+            }
+            int gw = x1 - x0 + 1, gh = y1 - y0 + 1;
+            int gMin = std::min(gw, gh), gMax = std::max(gw, gh) - 1;
+            if (!(gMin >= GLYPH_MIN_SIDE && gMax < GLYPH_MAX_SPAN
+                  && (float)cnt / (float)(gw * gh) >= GLYPH_GROUP_MIN_FILL)) continue;
+            for (int i : kv.second)
+                for (int idx : inkComps[i].pix) (*glyphMaskOut)[idx] = 1;
+        }
+    }
+
     return wallMask;
 }
 
 // 舊介面：emscripten 主流程使用，內部轉呼叫 buildWallMaskFromBuffer。
 std::vector<uint8_t> buildWallMask(int width, int height,
-                                    uint8_t darkThreshold, int spanThreshold) {
-    return buildWallMaskFromBuffer(mapBuffer, width, height, darkThreshold, spanThreshold);
+                                    uint8_t darkThreshold, int spanThreshold,
+                                    std::vector<uint8_t>* glyphMaskOut = nullptr) {
+    return buildWallMaskFromBuffer(mapBuffer, width, height, darkThreshold, spanThreshold,
+                                   nullptr, glyphMaskOut);
 }
 
 // 洪水填充演算法
@@ -775,6 +878,58 @@ static int componentMeanBrightness(const std::vector<int>& component) {
     return (int)(sum / (long long)component.size());
 }
 
+// 連通塊平均彩度。供粉彩守衛判定。
+static int componentMeanChroma(const std::vector<int>& component) {
+    if (component.empty() || mapBuffer == nullptr) return 0;
+    long long sum = 0;
+    for (int idx : component) {
+        int r = mapBuffer[idx*4], g = mapBuffer[idx*4+1], b = mapBuffer[idx*4+2];
+        sum += std::max({r, g, b}) - std::min({r, g, b});
+    }
+    return (int)(sum / (long long)component.size());
+}
+
+// 環內可走面積：塊 bbox(+1 pad) 內從外圈泛洪「非本塊」格，沒被流到且可走的格 =
+// 被本塊完全包住的地板（如店面塊內的白色標籤字）。文字頂多包住小字腔，輪廓環會包住大片。
+// glyphMask 像素不算（字芯已被直接填可走，算進去會把文字 AA 暈圈誤判成環）。
+static int interiorPassableArea(const std::vector<uint8_t>& mask, int width,
+                                const std::vector<int>& comp,
+                                int minX, int minY, int maxX, int maxY,
+                                const std::vector<uint8_t>& glyphMask) {
+    int bw = maxX - minX + 3, bh = maxY - minY + 3; // pad 1
+    int localTotal = bw * bh;
+    std::vector<uint8_t> inComp(localTotal, 0);
+    for (int idx : comp)
+        inComp[(idx / width - minY + 1) * bw + (idx % width) - minX + 1] = 1;
+    std::vector<uint8_t> seen(localTotal, 0);
+    std::vector<int> q;
+    q.reserve(bw * 2 + bh * 2);
+    for (int x = 0; x < bw; x++) { q.push_back(x); q.push_back((bh - 1) * bw + x); }
+    for (int y = 0; y < bh; y++) { q.push_back(y * bw); q.push_back(y * bw + bw - 1); }
+    for (int i : q) seen[i] = 1;
+    const int dx4[] = {0, 0, -1, 1};
+    const int dy4[] = {-1, 1,  0, 0};
+    for (int head = 0; head < (int)q.size(); head++) {
+        int c = q[head];
+        int cx = c % bw, cy = c / bw;
+        for (int d = 0; d < 4; d++) {
+            int nx = cx + dx4[d], ny = cy + dy4[d];
+            if (nx < 0 || nx >= bw || ny < 0 || ny >= bh) continue;
+            int ni = ny * bw + nx;
+            if (!seen[ni] && !inComp[ni]) { seen[ni] = 1; q.push_back(ni); }
+        }
+    }
+    int interior = 0;
+    for (int y = 1; y < bh - 1; y++)
+        for (int x = 1; x < bw - 1; x++) {
+            int i = y * bw + x;
+            if (seen[i] || inComp[i]) continue;
+            int gi = (y - 1 + minY) * width + (x - 1 + minX);
+            if (mask[gi] == 1 && !(!glyphMask.empty() && glyphMask[gi])) interior++;
+        }
+    return interior;
+}
+
 // 實心障礙島遮罩：非牆不可走連通塊中「厚、非字塊、且被可走包圍的島」（櫃位/設施/色塊店面）。
 // 用途：closing 後把這些島逐像素蓋回障礙 → 邊角不被 closing 圓化。
 // 必須限定「被可走包圍的島」：背景大區塊（如北車白底）伸進走道的細突刺本來就靠 closing
@@ -839,7 +994,8 @@ std::vector<uint8_t> buildSolidObstacleMask(const std::vector<uint8_t>& mask,
 // 跑在 connected-component 種子 BFS 之前：字若橫跨窄走道，先補掉才不會切斷連通。
 void flipThinEnclosedComponents(std::vector<uint8_t>& mask,
                                 const std::vector<uint8_t>& wallMask,
-                                int width, int height, int floorBri) {
+                                int width, int height, int floorBri,
+                                const std::vector<uint8_t>& glyphMask = {}) {
     int total = width * height;
     int maxArea = (int)(total * gThinMaxAreaFrac);
     std::vector<int> dt = computeObstacleThickness(mask, width, height);
@@ -859,12 +1015,18 @@ void flipThinEnclosedComponents(std::vector<uint8_t>& mask,
         bool touchesBorder = false;
         int borderTotal = 0, borderPassable = 0;
         int maxDT = 0;
+        int minXc = start % width, maxXc = minXc;
+        int minYc = start / width, maxYc = minYc;
 
         for (int head = 0; head < (int)queue.size(); head++) {
             int cur = queue[head];
             component.push_back(cur);
             if (dt[cur] > maxDT) maxDT = dt[cur];
             int cx = cur % width, cy = cur / width;
+            if (cx < minXc) minXc = cx;
+            if (cx > maxXc) maxXc = cx;
+            if (cy < minYc) minYc = cy;
+            if (cy > maxYc) maxYc = cy;
             if (cx == 0 || cx == width - 1 || cy == 0 || cy == height - 1) touchesBorder = true;
             for (int d = 0; d < 4; d++) {
                 int nx = cx + dx4[d], ny = cy + dy4[d];
@@ -886,15 +1048,23 @@ void flipThinEnclosedComponents(std::vector<uint8_t>& mask,
             ? (float)borderPassable / (float)borderTotal : -1.0f;
         bool thin = maxDT <= gStrokeMaxRadius && (int)component.size() <= maxArea;
         int meanBri = componentMeanBrightness(component);
+        int meanChroma = componentMeanChroma(component);
+        // 粉彩守衛：亮的粉彩填色 = 房間/店面色塊（非字非標記），不翻
+        bool pastel = meanChroma >= PASTEL_CHROMA_MIN && meanChroma < PASTEL_CHROMA_MAX &&
+            meanBri >= PASTEL_MIN_BRI;
         bool textBlob = maxDT <= TEXT_MAX_RADIUS && (int)component.size() <= TEXT_MAX_AREA &&
             meanBri <= floorBri - TEXT_DARKER_THAN_FLOOR;
-        bool flip = !touchesBorder &&
+        bool flip = !touchesBorder && !pastel &&
             ((thin && border >= FILL_HOLE_MIN_PASSABLE_BORDER) ||
              (textBlob && border >= TEXT_MIN_PASSABLE_BORDER));
+        // 環狀守衛：內部包大片可走 = 房間/店面輪廓（B1 紫色塊含白標籤字變薄環），不翻
+        if (flip && interiorPassableArea(mask, width, component, minXc, minYc, maxXc, maxYc, glyphMask) >=
+            std::max(RING_MIN_INTERIOR, (int)(RING_MIN_INTERIOR_FRAC * (float)component.size())))
+            flip = false;
 
         if (gDumpHoleStats)
-            printf("[holestats] phase=thin area=%d maxDT=%d bri=%d border=%.2f touchEdge=%d flip=%d\n",
-                   (int)component.size(), maxDT, meanBri, border,
+            printf("[holestats] phase=thin area=%d maxDT=%d bri=%d chr=%d border=%.2f touchEdge=%d flip=%d\n",
+                   (int)component.size(), maxDT, meanBri, meanChroma, border,
                    touchesBorder ? 1 : 0, flip ? 1 : 0);
 
         if (flip)
@@ -911,7 +1081,8 @@ void flipThinEnclosedComponents(std::vector<uint8_t>& mask,
 void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
                                           const std::vector<uint8_t>& wallMask,
                                           int width, int height, int minArea,
-                                          int floorBri = 255) {
+                                          int floorBri = 255,
+                                          const std::vector<uint8_t>& glyphMask = {}) {
     if (minArea <= 0) return;
     int total = width * height;
     std::vector<int> dt = computeObstacleThickness(mask, width, height);
@@ -932,12 +1103,18 @@ void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
         int borderTotal = 0;
         int borderPassable = 0;
         int maxDT = 0;
+        int minXc = start % width, maxXc = minXc;
+        int minYc = start / width, maxYc = minYc;
 
         for (int head = 0; head < (int)queue.size(); head++) {
             int cur = queue[head];
             component.push_back(cur);
             if (dt[cur] > maxDT) maxDT = dt[cur];
             int cx = cur % width, cy = cur / width;
+            if (cx < minXc) minXc = cx;
+            if (cx > maxXc) maxXc = cx;
+            if (cy < minYc) minYc = cy;
+            if (cy > maxYc) maxYc = cy;
             for (int d = 0; d < 4; d++) {
                 int nx = cx + dx4[d], ny = cy + dy4[d];
                 if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
@@ -964,13 +1141,21 @@ void removeSmallWallComponentsWithBarrier(std::vector<uint8_t>& mask,
         bool enclosed = passableBorderRatio >= FILL_HOLE_MIN_PASSABLE_BORDER;
         // 厚度護欄：實心厚塊是真障礙（櫃位/方塊），不翻；雜訊級小點與字塊照翻。
         int meanBri = componentMeanBrightness(component);
+        int meanChroma = componentMeanChroma(component);
         bool textLike = maxDT <= TEXT_MAX_RADIUS && meanBri <= floorBri - TEXT_DARKER_THAN_FLOOR;
         bool solidObstacle = maxDT > gStrokeMaxRadius && (int)component.size() >= gNoiseMaxArea && !textLike;
-        bool flip = small && enclosed && !solidObstacle;
+        // 粉彩守衛：亮的粉彩填色 = 店面色塊，不翻
+        bool pastel = meanChroma >= PASTEL_CHROMA_MIN && meanChroma < PASTEL_CHROMA_MAX &&
+            meanBri >= PASTEL_MIN_BRI;
+        bool flip = small && enclosed && !solidObstacle && !pastel;
+        // 環狀守衛（同 flipThin）：內部包大片可走 = 輪廓環，不翻
+        if (flip && interiorPassableArea(mask, width, component, minXc, minYc, maxXc, maxYc, glyphMask) >=
+            std::max(RING_MIN_INTERIOR, (int)(RING_MIN_INTERIOR_FRAC * (float)component.size())))
+            flip = false;
 
         if (gDumpHoleStats)
-            printf("[holestats] phase=fill area=%d maxDT=%d bri=%d border=%.2f flip=%d\n",
-                   (int)component.size(), maxDT, meanBri, passableBorderRatio,
+            printf("[holestats] phase=fill area=%d maxDT=%d bri=%d chr=%d border=%.2f flip=%d\n",
+                   (int)component.size(), maxDT, meanBri, meanChroma, passableBorderRatio,
                    flip ? 1 : 0);
 
         if (!flip) continue;
@@ -1117,8 +1302,10 @@ void intelligentFloodFill(int width, int height,
     if (sxs.empty()) return;
 
     // 建立牆壁屏障遮罩。darkThreshold=170 涵蓋淺灰框線，低彩度限制仍排除彩色箭頭。
+    // glyphMask：buildWallMask 認定為「字」的像素（字塊護欄元件 + 混合牆元件雕除字芯 + 彩色墨水字）。
     const uint8_t DARK_THRESHOLD = 170;
-    std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold);
+    std::vector<uint8_t> glyphMask((size_t)width * height, 0);
+    std::vector<uint8_t> wallMask = buildWallMask(width, height, DARK_THRESHOLD, spanThreshold, &glyphMask);
 
     // 每個種子各取主色，union 成多路色（buildPassableMaskRGB 對任一路色 OR 比對）。
     std::vector<RGB> pathColors;
@@ -1136,6 +1323,10 @@ void intelligentFloodFill(int width, int height,
     // 結束後把島逐像素蓋回障礙 → 櫃位/設施邊角不被 closing 圓化，走道不受影響。
     std::vector<uint8_t> mask = buildPassableMaskRGB(width, height, pathColors, tolSq,
                                  0, 0, wallMask);
+    // 字像素直接設可走（字下面是地板）——在 buildWallMask 已確定是字，不依賴洞分類的
+    // 包圍條件（種子取色偏移時，字洞可能與背景大連通塊相黏而翻不了）。
+    for (size_t i = 0; i < glyphMask.size(); i++)
+        if (glyphMask[i] && wallMask[i] == 0) mask[i] = 1;
     std::vector<uint8_t> solidMask = buildSolidObstacleMask(mask, wallMask, width, height, floorBri);
     auto stampSolid = [&](std::vector<uint8_t>& m) {
         for (size_t i = 0; i < m.size(); i++) if (solidMask[i]) m[i] = 0;
@@ -1157,7 +1348,7 @@ void intelligentFloodFill(int width, int height,
     }
 
     // 細筆畫/字塊洞（大字/圖示/箭頭）翻可走。在種子 BFS 之前跑：字橫跨窄走道也不會切斷連通。
-    flipThinEnclosedComponents(mask, wallMask, width, height, floorBri);
+    flipThinEnclosedComponents(mask, wallMask, width, height, floorBri, glyphMask);
 
     // clipMode==2：先把灰色圖框「封成封閉牆」，必須在連通分量限制之前 →
     // 框外白底會與種子斷開、在下面的 connected-component 被丟棄（解 hospital 漏到框外）。
@@ -1205,7 +1396,7 @@ void intelligentFloodFill(int width, int height,
         stampSolid(mask);
     }
     if (smoothMinWallArea > 0) {
-        removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea, floorBri);
+        removeSmallWallComponentsWithBarrier(mask, wallMask, width, height, smoothMinWallArea, floorBri, glyphMask);
     }
 
     // 過度捕捉對策後處理：clipMode==1 裁到牆包圍盒；clipMode==2 灰框已封牆，這裡保險裁掉框外殘留。
